@@ -1173,7 +1173,7 @@ func (d *Yun139) handleMetaGroupCopy(ctx context.Context, srcObj, dstDir model.O
 	body := base.Json{
 		"commonAccountInfo": base.Json{
 			"accountType":   "1",
-			"accountUserId": d.ref.UserDomainID,
+			"accountUserId": d.UserDomainID,
 		},
 		"destCatalogID":    destCatalogID,
 		"destCloudID":      d.CloudID,
