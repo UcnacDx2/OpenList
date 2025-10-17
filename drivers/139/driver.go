@@ -300,13 +300,39 @@ func (d *Yun139) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj,
 		}
 		return srcObj, nil
 	case MetaFamily:
-		err := d.Copy(ctx, srcObj, dstDir)
-		if err != nil {
-			return nil, fmt.Errorf("failed to copy in move operation: %w", err)
+		pathname := "/isbo/openApi/createBatchOprTask"
+		var contentList []string
+		var catalogList []string
+		if srcObj.IsDir() {
+			catalogList = append(catalogList, path.Join(srcObj.GetPath(), srcObj.GetID()))
+		} else {
+			contentList = append(contentList, path.Join(srcObj.GetPath(), srcObj.GetID()))
 		}
-		err = d.Remove(ctx, srcObj)
+
+		body := base.Json{
+			"catalogList": catalogList,
+			"accountInfo": base.Json{
+				"accountName": d.getAccount(),
+				"accountType": "1",
+			},
+			"contentList":   contentList,
+			"destCatalogID": dstDir.GetID(),
+			"destGroupID":   d.CloudID,
+			"destPath":      path.Join(dstDir.GetPath(), dstDir.GetID()),
+			"destType":      0,
+			"srcGroupID":    d.CloudID,
+			"srcType":       0,
+			"taskType":      3,
+		}
+
+		var resp CreateBatchOprTaskResp
+		_, err := d.isboPost(pathname, body, &resp)
 		if err != nil {
-			return nil, fmt.Errorf("failed to remove in move operation: %w", err)
+			return nil, err
+		}
+		log.Debugf("[139] Move MetaFamily CreateBatchOprTaskResp.Result.ResultCode: %s", resp.Result.ResultCode)
+		if resp.Result.ResultCode != "0" {
+			return nil, fmt.Errorf("failed to move in family cloud: %s", resp.Result.ResultDesc)
 		}
 		return srcObj, nil
 	default:
@@ -474,7 +500,7 @@ func (d *Yun139) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
 		body := base.Json{
 			"commonAccountInfo": base.Json{
 				"accountType":   "1",
-				"accountUserId": d.ref.UserDomainID,
+				"accountUserId": d.UserDomainID,
 			},
 			"destCatalogID":    dstDir.GetID(),
 			"destCloudID":      d.CloudID,

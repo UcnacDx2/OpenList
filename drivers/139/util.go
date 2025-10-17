@@ -165,7 +165,21 @@ func (d *Yun139) request(url string, method string, callback base.ReqCallback, r
 	}
 	log.Debugf("[139] response body: %s", res.String())
 	if !e.Success {
-		return nil, errors.New(e.Message)
+	// Always try to unmarshal to the specific response type first if 'resp' is provided.
+	if resp != nil {
+		err = utils.Json.Unmarshal(res.Body(), resp)
+		if err != nil {
+			log.Debugf("[139] failed to unmarshal response to specific type: %v", err)
+			return nil, err // Return unmarshal error
+		}
+		if createBatchOprTaskResp, ok := resp.(*CreateBatchOprTaskResp); ok {
+			log.Debugf("[139] CreateBatchOprTaskResp.Result.ResultCode: %s", createBatchOprTaskResp.Result.ResultCode)
+			if createBatchOprTaskResp.Result.ResultCode == "0" {
+				goto SUCCESS_PROCESS
+			}
+		}
+	}
+	return nil, errors.New(e.Message) // Fallback to original error if not handled
 	}
 	if resp != nil {
 		err = utils.Json.Unmarshal(res.Body(), resp)
@@ -173,6 +187,7 @@ func (d *Yun139) request(url string, method string, callback base.ReqCallback, r
 			return nil, err
 		}
 	}
+SUCCESS_PROCESS:
 	return res.Body(), nil
 }
 
@@ -537,6 +552,13 @@ func (d *Yun139) personalRequest(pathname string, method string, callback base.R
 
 func (d *Yun139) personalPost(pathname string, data interface{}, resp interface{}) ([]byte, error) {
 	return d.personalRequest(pathname, http.MethodPost, func(req *resty.Request) {
+		req.SetBody(data)
+	}, resp)
+}
+
+func (d *Yun139) isboPost(pathname string, data interface{}, resp interface{}) ([]byte, error) {
+	url := "https://group.yun.139.com/hcy/mutual/adapter" + pathname
+	return d.request(url, http.MethodPost, func(req *resty.Request) {
 		req.SetBody(data)
 	}, resp)
 }

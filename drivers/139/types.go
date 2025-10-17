@@ -364,3 +364,28 @@ type ModifyCloudDocV2Resp struct {
 		ResultDesc string `json:"resultDesc"`
 	} `json:"result"`
 }
+
+type CreateBatchOprTaskReq struct {
+	CatalogList       []string `json:"catalogList"`
+	CommonAccountInfo struct {
+		Account     string `json:"account"`
+		AccountType string `json:"accountType"`
+	} `json:"commonAccountInfo"`
+	ContentList       []string `json:"contentList"`
+	DestCatalogID     string   `json:"destCatalogID"`
+	DestGroupID       string   `json:"destGroupID"`
+	DestPath          string   `json:"destPath"`
+	DestType          int      `json:"destType"`
+	SourceCatalogType int      `json:"sourceCatalogType"`
+	SourceCloudID     string   `json:"sourceCloudID"`
+	SourceType      int      `json:"sourceType"`
+	TaskType        int      `json:"taskType"`
+}
+
+type CreateBatchOprTaskResp struct {
+	Result struct {
+		ResultCode string `json:"resultCode"`
+		ResultDesc string `json:"resultDesc"`
+	} `json:"result"`
+	TaskID string `json:"taskID"`
+}
