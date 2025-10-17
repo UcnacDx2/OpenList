@@ -329,3 +329,38 @@ type FamilyDiskInfoResp struct {
 		DiskSize string `json:"diskSize"`
 	} `json:"data"`
 }
+
+type AndAlbumUploadResp struct {
+	Result struct {
+		ResultCode string `json:"resultCode"`
+		ResultDesc string `json:"resultDesc"`
+	} `json:"result"`
+	UploadResult struct {
+		UploadTaskID     string `json:"uploadTaskID"`
+		RedirectionURL   string `json:"redirectionUrl"`
+		NewContentIDList []struct {
+			ContentID   string `json:"contentID"`
+			ContentName string `json:"contentName"`
+		} `json:"newContentIDList"`
+	} `json:"uploadResult"`
+}
+
+// Add new structs here
+type ModifyCloudDocV2Req struct {
+	CatalogType       int    `json:"catalogType"`
+	CloudID           string `json:"cloudID"`
+	CommonAccountInfo struct {
+		Account     string `json:"account"`
+		AccountType string `json:"accountType"`
+	} `json:"commonAccountInfo"`
+	DocLibName   string `json:"docLibName"`
+	DocLibraryID string `json:"docLibraryID"`
+	Path         string `json:"path"`
+}
+
+type ModifyCloudDocV2Resp struct {
+	Result struct {
+		ResultCode string `json:"resultCode"`
+		ResultDesc string `json:"resultDesc"`
+	} `json:"result"`
+}

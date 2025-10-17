@@ -8,6 +8,9 @@ import (
 type Addition struct {
 	//Account       string `json:"account" required:"true"`
 	Authorization string `json:"authorization" type:"text" required:"true"`
+	Username             string `json:"username" required:"true"`
+	Password             string `json:"password" required:"true" secret:"true"`
+	DeviceProfile        string `json:"device_profile" required:"true" type:"text"`
 	driver.RootID
 	Type                 string `json:"type" type:"select" options:"personal_new,family,group,personal" default:"personal_new"`
 	CloudID              string `json:"cloud_id"`

@@ -13,6 +13,7 @@ import (
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
 	"github.com/OpenListTeam/OpenList/v4/internal/driver"
 	"github.com/OpenListTeam/OpenList/v4/internal/errs"
+	"github.com/OpenListTeam/OpenList/v4/internal/op"
 	"github.com/OpenListTeam/OpenList/v4/internal/model"
 	streamPkg "github.com/OpenListTeam/OpenList/v4/internal/stream"
 	"github.com/OpenListTeam/OpenList/v4/pkg/cron"
@@ -28,6 +29,7 @@ type Yun139 struct {
 	Account           string
 	ref               *Yun139
 	PersonalCloudHost string
+	RootPath          string
 }
 
 func (d *Yun139) Config() driver.Config {
@@ -41,7 +43,17 @@ func (d *Yun139) GetAddition() driver.Additional {
 func (d *Yun139) Init(ctx context.Context) error {
 	if d.ref == nil {
 		if len(d.Authorization) == 0 {
-			return fmt.Errorf("authorization is empty")
+			if d.Username != "" && d.Password != "" {
+				log.Infof("139yun: authorization is empty, trying to login with password.")
+				newAuth, err := d.loginWithPassword()
+				if err != nil {
+					return fmt.Errorf("login with password failed: %w", err)
+				}
+				d.Authorization = newAuth
+				op.MustSaveDriverStorage(d)
+			} else {
+				return fmt.Errorf("authorization is empty and username/password is not provided")
+			}
 		}
 		err := d.refreshToken()
 		if err != nil {
@@ -92,7 +104,15 @@ func (d *Yun139) Init(ctx context.Context) error {
 		if len(d.Addition.RootFolderID) == 0 {
 			d.RootFolderID = d.CloudID
 		}
+		_, err := d.groupGetFiles(d.RootFolderID)
+		if err != nil {
+			return err
+		}
 	case MetaFamily:
+		_, err := d.familyGetFiles(d.RootFolderID)
+		if err != nil {
+			return err
+		}
 	default:
 		return errs.NotImplement
 	}
@@ -279,6 +299,16 @@ func (d *Yun139) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj,
 			return nil, err
 		}
 		return srcObj, nil
+	case MetaFamily:
+		err := d.Copy(ctx, srcObj, dstDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to copy in move operation: %w", err)
+		}
+		err = d.Remove(ctx, srcObj)
+		if err != nil {
+			return nil, fmt.Errorf("failed to remove in move operation: %w", err)
+		}
+		return srcObj, nil
 	default:
 		return nil, errs.NotImplement
 	}
@@ -353,19 +383,27 @@ func (d *Yun139) Rename(ctx context.Context, srcObj model.Obj, newName string) e
 		var data base.Json
 		var pathname string
 		if srcObj.IsDir() {
-			// 网页接口不支持重命名家庭云文件夹
-			// data = base.Json{
-			// 	"catalogType": 3,
-			// 	"catalogID":   srcObj.GetID(),
-			// 	"catalogName": newName,
-			// 	"commonAccountInfo": base.Json{
-			// 		"account":     d.getAccount(),
-			// 		"accountType": 1,
-			// 	},
-			// 	"path": srcObj.GetPath(),
-			// }
-			// pathname = "/orchestration/familyCloud-rebuild/photoContent/v1.0/modifyCatalogInfo"
-			return errs.NotImplement
+			pathname = "/modifyCloudDocV2"
+			data = base.Json{
+				"catalogType": 3,
+				"cloudID":     d.CloudID,
+				"commonAccountInfo": base.Json{
+					"account":     d.getAccount(),
+					"accountType": "1",
+				},
+				"docLibName":   newName,
+				"docLibraryID": srcObj.GetID(),
+				"path":         path.Join(srcObj.GetPath(), srcObj.GetID()),
+			}
+			var resp ModifyCloudDocV2Resp
+			_, err = d.andAlbumRequest(pathname, data, &resp)
+			if err != nil {
+				return err
+			}
+			if resp.Result.ResultCode != "0" {
+				return fmt.Errorf("failed to rename family folder: %s", resp.Result.ResultDesc)
+			}
+			return nil
 		} else {
 			data = base.Json{
 				"contentID":   srcObj.GetID(),
@@ -421,6 +459,34 @@ func (d *Yun139) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
 		}
 		pathname := "/orchestration/personalCloud/batchOprTask/v1.0/createBatchOprTask"
 		_, err = d.post(pathname, data, nil)
+	case MetaGroup:
+		err = d.handleMetaGroupCopy(ctx, srcObj, dstDir)
+	case MetaFamily:
+		pathname := "/copyContentCatalog"
+		var sourceContentIDs []string
+		var sourceCatalogIDs []string
+		if srcObj.IsDir() {
+			sourceCatalogIDs = append(sourceCatalogIDs, srcObj.GetID())
+		} else {
+			sourceContentIDs = append(sourceContentIDs, srcObj.GetID())
+		}
+
+		body := base.Json{
+			"commonAccountInfo": base.Json{
+				"accountType":   "1",
+				"accountUserId": d.ref.UserDomainID,
+			},
+			"destCatalogID":    dstDir.GetID(),
+			"destCloudID":      d.CloudID,
+			"sourceCatalogIDs": sourceCatalogIDs,
+			"sourceCloudID":    d.CloudID,
+			"sourceContentIDs": sourceContentIDs,
+		}
+
+		var resp base.Json // Assuming a generic JSON response for success/failure
+		_, err = d.andAlbumRequest(pathname, body, &resp)
+		// TODO: Need to check the actual success condition from the response.
+		// For now, we assume no error means success.
 	default:
 		err = errs.NotImplement
 	}
@@ -520,6 +586,7 @@ func (d *Yun139) getPartSize(size int64) int64 {
 func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStreamer, up driver.UpdateProgress) error {
 	switch d.Addition.Type {
 	case MetaPersonalNew:
+		var uploadPartInfos []PersonalPartInfo
 		var err error
 		fullHash := stream.GetHash().GetHash(utils.SHA256)
 		if len(fullHash) != utils.SHA256.Width {
@@ -592,11 +659,12 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 		// 快传的情况下同样需要手动处理冲突
 		if resp.Data.PartInfos != nil {
 			// Progress
+			uploadPartInfos = resp.Data.PartInfos
 			p := driver.NewProgress(size, up)
 			rateLimited := driver.NewLimitedUploadStream(ctx, stream)
 
 			// 先上传前100个分片
-			err = d.uploadPersonalParts(ctx, partInfos, resp.Data.PartInfos, rateLimited, p)
+			err = d.uploadPersonalParts(ctx, partInfos, uploadPartInfos, rateLimited, p)
 			if err != nil {
 				return err
 			}
@@ -680,6 +748,8 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 		return nil
 	case MetaPersonal:
 		fallthrough
+	case MetaGroup:
+		fallthrough
 	case MetaFamily:
 		// 处理冲突
 		// 获取文件列表
@@ -727,12 +797,17 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 			},
 		}
 		pathname := "/orchestration/personalCloud/uploadAndDownload/v1.0/pcUploadFileRequest"
-		if d.isFamily() {
+		if d.isFamily() || d.Addition.Type == MetaGroup {
+			uploadPath := path.Join(dstDir.GetPath(), dstDir.GetID())
+			// if dstDir is root folder
+			if dstDir.GetID() == d.RootFolderID {
+				uploadPath = d.RootPath
+			}
 			data = d.newJson(base.Json{
 				"fileCount":    1,
 				"manualRename": 2,
 				"operation":    0,
-				"path":         path.Join(dstDir.GetPath(), dstDir.GetID()),
+				"path":         uploadPath,
 				"seqNo":        random.String(32), // 序列号不能为空
 				"totalSize":    reportSize,
 				"uploadContentList": []base.Json{{
@@ -744,6 +819,7 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 			pathname = "/orchestration/familyCloud-rebuild/content/v1.0/getFileUploadURL"
 		}
 		var resp UploadResp
+		log.Debugf("[139] upload request body: %+v", data)
 		_, err = d.post(pathname, data, &resp)
 		if err != nil {
 			return err

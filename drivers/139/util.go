@@ -1,8 +1,14 @@
 package _139
 
 import (
+	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/md5"
+	"crypto/sha1"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -96,12 +102,17 @@ func (d *Yun139) refreshToken() error {
 		SetBody(reqBody).
 		SetResult(&resp).
 		Post(url)
-	if err != nil {
-		return err
+	if err != nil || resp.Return != "0" {
+		log.Warnf("139yun: failed to refresh token with old token: %v, desc: %s. trying to login with password.", err, resp.Desc)
+		newAuth, loginErr := d.loginWithPassword()
+		if loginErr != nil {
+			return fmt.Errorf("failed to login with password after refresh failed: %w", loginErr)
+		}
+		d.Authorization = newAuth
+		op.MustSaveDriverStorage(d)
+		return nil
 	}
-	if resp.Return != "0" {
-		return fmt.Errorf("failed to refresh token: %s", resp.Desc)
-	}
+
 	d.Authorization = base64.StdEncoding.EncodeToString([]byte(splits[0] + ":" + splits[1] + ":" + resp.Token))
 	op.MustSaveDriverStorage(d)
 	return nil
@@ -146,8 +157,13 @@ func (d *Yun139) request(url string, method string, callback base.ReqCallback, r
 
 	var e BaseResp
 	req.SetResult(&e)
+	log.Debugf("[139] request: %s %s, body: %s", method, url, string(body))
 	res, err := req.Execute(method, url)
-	log.Debugln(res.String())
+	if err != nil {
+		log.Debugf("[139] request error: %v", err)
+		return nil, err
+	}
+	log.Debugf("[139] response body: %s", res.String())
 	if !e.Success {
 		return nil, errors.New(e.Message)
 	}
@@ -311,6 +327,9 @@ func (d *Yun139) familyGetFiles(catalogID string) ([]model.Obj, error) {
 			return nil, err
 		}
 		path := resp.Data.Path
+		if catalogID == d.RootFolderID {
+			d.RootPath = path
+		}
 		for _, catalog := range resp.Data.CloudCatalogList {
 			f := model.Object{
 				ID:       catalog.CatalogID,
@@ -366,6 +385,9 @@ func (d *Yun139) groupGetFiles(catalogID string) ([]model.Obj, error) {
 			return nil, err
 		}
 		path := resp.Data.GetGroupContentResult.ParentCatalogID
+		if catalogID == d.RootFolderID {
+			d.RootPath = path
+		}
 		for _, catalog := range resp.Data.GetGroupContentResult.CatalogList {
 			f := model.Object{
 				ID:       catalog.CatalogID,
@@ -494,11 +516,13 @@ func (d *Yun139) personalRequest(pathname string, method string, callback base.R
 
 	var e BaseResp
 	req.SetResult(&e)
+	log.Debugf("[139] personal request: %s %s, body: %s", method, url, string(body))
 	res, err := req.Execute(method, url)
 	if err != nil {
+		log.Debugf("[139] personal request error: %v", err)
 		return nil, err
 	}
-	log.Debugln(res.String())
+	log.Debugf("[139] personal response body: %s", res.String())
 	if !e.Success {
 		return nil, errors.New(e.Message)
 	}
@@ -702,4 +726,441 @@ func (d *Yun139) getFamilyDiskInfo(ctx context.Context) (*FamilyDiskInfoResp, er
 		return nil, err
 	}
 	return &resp, nil
+}
+
+
+
+func (d *Yun139) getDeviceProfile() string {
+	if d.ref != nil {
+		return d.ref.getDeviceProfile()
+	}
+	return d.DeviceProfile
+}
+
+func getMd5(dataStr string) string {
+	hash := md5.Sum([]byte(dataStr))
+	return fmt.Sprintf("%x", hash)
+}
+
+func (d *Yun139) step1_password_login(device map[string]interface{}) (string, error) {
+	url := "https://base.hjq.komect.com/base/user/passwdLogin"
+	h := sha1.New()
+	h.Write([]byte("fetion.com.cn:" + d.Password))
+	authdata := fmt.Sprintf("%x", h.Sum(nil))
+	virtual_authdata := getMd5(d.Password)
+	
+	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+	body := base.Json{
+		"loginType":       "UNIAUTH_PASSWORD",
+		"phoneID":         device["phone_id"],
+		"phoneModel":      device["phone_model"],
+		"virtualAuthdata": virtual_authdata,
+		"phoneBrand":      device["phone_brand"],
+		"authType":        "10",
+		"timestamp":       ts,
+		"deviceUuid":      device["device_uuid"],
+		"os":              "android",
+		"phoneNumber":     d.Username,
+		"userAccount":     d.Username,
+		"authdata":        authdata,
+		"appid":           "01010811",
+		"wifiMac":         device["mac_address"],
+	}
+	
+	var resp base.Json
+	res, err := base.RestyClient.R().
+		SetHeaders(map[string]string{
+			"version":      device["app_version"].(string),
+			"OS":           "2",
+			"OSVersion":    device["android_version"].(string),
+			"phoneType":    device["phone_type"].(string),
+			"User-Agent":   "UniApp;HjqAppCategory/Phone",
+			"Content-Type": "application/json; charset=UTF-8",
+		}).
+		SetBody(body).
+		SetResult(&resp).
+		Post(url)
+
+	if err != nil {
+		return "", err
+	}
+	
+	passId := utils.Json.Get(res.Body(), "data", "passId").ToString()
+	if passId == "" {
+		return "", fmt.Errorf("step1 failed: %s", utils.Json.Get(res.Body(), "message").ToString())
+	}
+	return passId, nil
+}
+
+func (d *Yun139) step2_get_single_token(passId string, device map[string]interface{}) (string, error) {
+	url := fmt.Sprintf("https://base.hjq.komect.com/login/user/getSingleToken/%s", passId)
+	var resp base.Json
+	res, err := base.RestyClient.R().
+		SetHeaders(map[string]string{
+			"version":      device["app_version"].(string),
+			"OS":           "2",
+			"OSVersion":    device["android_version"].(string),
+			"phoneType":    device["phone_type"].(string),
+			"User-Agent":   "UniApp;HjqAppCategory/Phone",
+			"Content-Type": "application/json; charset=UTF-8",
+		}).
+		SetBody("{}").
+		SetResult(&resp).
+		Post(url)
+
+	if err != nil {
+		return "", err
+	}
+
+	token := utils.Json.Get(res.Body(), "data", "token").ToString()
+	if token == "" {
+		return "", fmt.Errorf("step2 failed: token is empty")
+	}
+	return token, nil
+}
+
+func pkcs7Pad(data []byte, blockSize int) []byte {
+	padding := blockSize - len(data)%blockSize
+	padText := bytes.Repeat([]byte{byte(padding)}, padding)
+	return append(data, padText...)
+}
+
+func pkcs7Unpad(data []byte) ([]byte, error) {
+	length := len(data)
+	if length == 0 {
+		return nil, errors.New("pkcs7: data is empty")
+	}
+	unpadding := int(data[length-1])
+	if unpadding > length {
+		return nil, errors.New("pkcs7: invalid padding")
+	}
+	return data[:(length - unpadding)], nil
+}
+
+func aesCbcEncrypt(data, key, iv []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	data = pkcs7Pad(data, block.BlockSize())
+	encrypted := make([]byte, len(data))
+	mode := cipher.NewCBCEncrypter(block, iv)
+	mode.CryptBlocks(encrypted, data)
+	return encrypted, nil
+}
+
+func aesCbcDecrypt(data, key, iv []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(data)%block.BlockSize() != 0 {
+		return nil, errors.New("ciphertext is not a multiple of the block size")
+	}
+	mode := cipher.NewCBCDecrypter(block, iv)
+	decrypted := make([]byte, len(data))
+	mode.CryptBlocks(decrypted, data)
+	return pkcs7Unpad(decrypted)
+}
+
+func (d *Yun139) step3_third_party_login(token string, device map[string]interface{}) (string, error) {
+	const URL = "https://user-njs.yun.139.com/user/thirdlogin"
+	var err error
+	var finalJsonBytes []byte
+
+	key1, _ := hex.DecodeString("73634235495062495331515373756c734e7253306c673d3d")
+	key2, _ := hex.DecodeString("7150714477323633586746674c337538")
+	iv := []byte(random.String(16))
+
+	h := sha1.New()
+	h.Write([]byte("fetion.com.cn:" + token))
+	secinfo := strings.ToUpper(fmt.Sprintf("%x", h.Sum(nil)))
+
+	plainJson := base.Json{
+		"clientkey_decrypt": "hejiaqin#2020#la#84dE23LT^%d9",
+		"clienttype":        "673",
+		"cpid":              "295",
+		"dycpwd":            token,
+		"extInfo":           base.Json{"ifOpenAccount": "0"},
+		"loginMode":         "0",
+		"msisdn":            d.Username,
+		"pintype":           "13",
+		"secinfo":           secinfo,
+		"version":           "9.9.0",
+	}
+
+	sortedJson, err := sortedJsonStringify(plainJson)
+	if err != nil {
+		return "", fmt.Errorf("step3 failed to stringify json: %w", err)
+	}
+
+	encrypted, err := aesCbcEncrypt([]byte(sortedJson), key1, iv)
+	if err != nil {
+		return "", fmt.Errorf("step3 aes encrypt failed: %w", err)
+	}
+
+	payload := base64.StdEncoding.EncodeToString(append(iv, encrypted...))
+
+	var respBody []byte
+	res, err := base.RestyClient.R().
+		SetHeaders(map[string]string{
+			"Host":                "user-njs.yun.139.com",
+			"hcy-cool-flag":       "1",
+			"x-huawei-channelsrc": "10214502",
+			"x-mm-source":         "0",
+			"x-useragent":         fmt.Sprintf("androidsdk|%s|android%s|6.1.1.0|||1220x2574|", device["phone_type"], device["android_version"]),
+			"x-deviceinfo":        fmt.Sprintf("1|127.0.0.1|5|6.1.1.0|%s|%s|%s|android %s|1220x2574|android|||", device["phone_brand"], device["phone_type"], device["device_uuid"], device["android_version"]),
+			"content-type":        "application/json; charset=utf-8",
+			"user-agent":          "okhttp/4.11.0",
+		}).
+		SetBody(payload).
+		Post(URL)
+
+	if err != nil {
+		return "", err
+	}
+	respBody = res.Body()
+
+	log.Debugf("Step 3 Raw Response: %s", string(respBody))
+
+	// Check if the response is a JSON error
+	if len(respBody) > 0 && respBody[0] == '{' {
+		var errorResp BaseResp
+		if err := utils.Json.Unmarshal(respBody, &errorResp); err == nil && !errorResp.Success {
+			return "", fmt.Errorf("step3 failed with server error: %s", errorResp.Message)
+		}
+	}
+
+	// Layer 1 Decryption
+	decoded, err := base64.StdEncoding.DecodeString(string(respBody))
+	if err != nil {
+		return "", fmt.Errorf("step3 response base64 decode failed: %w. Raw response: %s", err, string(respBody))
+	}
+	resIv := decoded[:16]
+	resCiphertext := decoded[16:]
+	decryptedL1, err := aesCbcDecrypt(resCiphertext, key1, resIv)
+	if err != nil {
+		return "", fmt.Errorf("step3 response layer1 aes decrypt failed: %w", err)
+	}
+
+	hexInner := utils.Json.Get(decryptedL1, "data").ToString()
+	if hexInner == "" {
+		return "", errors.New("step3 first layer decrypt failed: data is empty")
+	}
+
+	// The provided JS code for layer 2 is AES-ECB, which doesn't use an IV.
+	hexInnerBytes, _ := hex.DecodeString(hexInner)
+
+	block, err := aes.NewCipher(key2)
+	if err != nil {
+		return "", fmt.Errorf("step3 failed to create cipher for layer2: %w", err)
+	}
+	decryptedL2 := make([]byte, len(hexInnerBytes))
+	size := block.BlockSize()
+	for bs, be := 0, size; bs < len(hexInnerBytes); bs, be = bs+size, be+size {
+		block.Decrypt(decryptedL2[bs:be], hexInnerBytes[bs:be])
+	}
+	finalJsonBytes, err = pkcs7Unpad(decryptedL2)
+	if err != nil {
+		return "", fmt.Errorf("step3 second layer pkcs7 unpad failed: %w", err)
+	}
+
+	account := utils.Json.Get(finalJsonBytes, "account").ToString()
+	authToken := utils.Json.Get(finalJsonBytes, "authToken").ToString()
+	userDomainId := utils.Json.Get(finalJsonBytes, "userDomainId").ToString()
+	if account == "" || authToken == "" || userDomainId == "" {
+		return "", errors.New("step3 final decrypt failed: account, authToken or userDomainId is empty")
+	}
+
+	d.UserDomainID = userDomainId
+	newAuthorization := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("pc:%s:%s", account, authToken)))
+	return newAuthorization, nil
+}
+
+
+func (d *Yun139) loginWithPassword() (string, error) {
+	if d.Username == "" || d.Password == "" || d.DeviceProfile == "" {
+		return "", errors.New("username, password or device_profile is empty")
+	}
+
+	var device map[string]interface{}
+	err := utils.Json.UnmarshalFromString(d.DeviceProfile, &device)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse device_profile: %w", err)
+	}
+
+	passId, err := d.step1_password_login(device)
+	if err != nil {
+		return "", err
+	}
+	log.Infof("Step 1 success, passId: %s", passId)
+
+	token, err := d.step2_get_single_token(passId, device)
+	if err != nil {
+		return "", err
+	}
+	log.Infof("Step 2 success, token: %s", token)
+
+	newAuth, err := d.step3_third_party_login(token, device)
+	if err != nil {
+		return "", err
+	}
+	log.Infof("Step 3 success, new authorization generated.")
+
+	// TODO: Implement step 4, 5 if needed for other modes, but for drive, this is enough.
+	d.Authorization = newAuth // Ensure Authorization is also updated before saving
+	op.MustSaveDriverStorage(d)
+	return newAuth, nil
+}
+
+
+var andAlbumAesKey, _ = hex.DecodeString("73634235495062495331515373756c734e7253306c673d3d") // Corrected AES key
+
+// sortedJsonStringify recursively sorts keys of maps within the data and then marshals to a JSON string.
+func sortedJsonStringify(data interface{}) (string, error) {
+	// For the known structures, jsoniter's SortMapKeys should suffice.
+	json := jsoniter.Config{
+		SortMapKeys: true,
+	}.Froze()
+	res, err := json.MarshalToString(data)
+	return res, err
+}
+
+func (d *Yun139) andAlbumRequest(pathname string, body interface{}, resp interface{}) ([]byte, error) {
+	url := "https://group.yun.139.com/hcy/family/adapter/andAlbum/openApi" + pathname
+
+	var device map[string]interface{}
+	err := utils.Json.UnmarshalFromString(d.getDeviceProfile(), &device)
+	if err != nil {
+		return nil, fmt.Errorf("andAlbum: failed to parse device_profile: %w", err)
+	}
+
+	// 1. Marshal and sort the request body
+	sortedJson, err := sortedJsonStringify(body)
+	if err != nil {
+		return nil, fmt.Errorf("andAlbum: failed to marshal and sort body: %w", err)
+	}
+	log.Errorf("andAlbum: Request Body (plaintext): %s", sortedJson)
+
+	// 2. Encrypt the body
+	iv := []byte(random.String(16))
+	encryptedBody, err := aesCbcEncrypt([]byte(sortedJson), andAlbumAesKey, iv)
+	if err != nil {
+		return nil, fmt.Errorf("andAlbum: failed to encrypt body: %w", err)
+	}
+	payload := base64.StdEncoding.EncodeToString(append(iv, encryptedBody...))
+
+	// 3. Make the request
+	res, err := base.RestyClient.R().
+		SetHeaders(map[string]string{
+			"Host":                "group.yun.139.com",
+			"authorization":       "Basic " + d.getAuthorization(),
+			"x-svctype":           "2",
+			"hcy-cool-flag":       "1",
+			"api-version":         "v2",
+			"x-huawei-channelsrc": "10214502",
+			"x-sdk-channelsrc":    "",
+			"x-mm-source":         "0",
+			"x-useragent":         fmt.Sprintf("androidsdk|%s|android%s|6.1.1.1|||1220x1951|10214502", device["phone_type"], device["android_version"]),
+			"x-deviceinfo":        fmt.Sprintf("4|127.0.0.1|5|6.1.1.1|%s|%s|%s|android %s|1220x1951|android|||", device["phone_brand"], device["phone_type"], device["device_uuid"], device["android_version"]),
+			"content-type":        "application/json; charset=utf-8",
+			"user-agent":          "okhttp/4.11.0",
+			"accept-encoding":     "gzip",
+		}).
+		SetBody(payload).
+		Post(url)
+
+	if err != nil {
+		return nil, err
+	}
+
+	if res.StatusCode() != 200 {
+		return nil, fmt.Errorf("andAlbum: unexpected status code %d: %s", res.StatusCode(), res.String())
+	}
+
+	// 4. Decrypt the response (handle both encrypted and plain JSON)
+	respBody := res.Body()
+	var decryptedBytes []byte
+
+	log.Debugf("andAlbum: Raw Response Body Length: %d", len(respBody))
+	log.Debugf("andAlbum: Raw Response Body: %s", string(respBody))
+
+	// Check if the response is likely a JSON object
+	if len(respBody) > 0 && respBody[0] == '{' {
+		log.Warnf("andAlbum: received a plain JSON response, not an encrypted string. Body: %s", string(respBody))
+		decryptedBytes = respBody
+	} else {
+		// Assume it's a Base64 encoded string and try to decrypt
+		cleanedBody := strings.TrimSpace(string(respBody)) // Trim whitespace
+
+		// Add padding if missing
+		if len(cleanedBody)%4 != 0 {
+			padding := 4 - len(cleanedBody)%4
+			for i := 0; i < padding; i++ {
+				cleanedBody += "="
+			}
+			log.Warnf("andAlbum: Added %d padding characters to Base64 body. Cleaned body after padding: '%s'", padding, cleanedBody)
+		}
+
+		decodedResp, err := base64.StdEncoding.DecodeString(cleanedBody) // Use cleanedBody
+		if err != nil {
+			return nil, fmt.Errorf("andAlbum: response base64 decode failed: %w. Cleaned body: '%s'", err, cleanedBody)
+		}
+
+		if len(decodedResp) < 16 {
+			return nil, fmt.Errorf("andAlbum: decoded response is too short to be encrypted. Length: %d", len(decodedResp))
+		}
+
+		respIv := decodedResp[:16]
+		respCiphertext := decodedResp[16:]
+
+		decryptedBytes, err = aesCbcDecrypt(respCiphertext, andAlbumAesKey, respIv)
+		if err != nil {
+			return nil, fmt.Errorf("andAlbum: response aes decrypt failed: %w", err)
+		}
+	}
+
+	// 5. Unmarshal to the final response struct
+	if resp != nil {
+		err = utils.Json.Unmarshal(decryptedBytes, resp)
+		if err != nil {
+			// Log the decrypted content for debugging
+			log.Debugf("andAlbum: failed to unmarshal decrypted response. Decrypted content: %s", string(decryptedBytes))
+			return nil, fmt.Errorf("andAlbum: failed to unmarshal decrypted response: %w", err)
+		}
+		log.Errorf("andAlbum: Response Body (decrypted): %s", string(decryptedBytes))
+	}
+
+	return decryptedBytes, nil
+}
+
+func (d *Yun139) handleMetaGroupCopy(ctx context.Context, srcObj, dstDir model.Obj) error {
+	pathname := "/copyContentCatalog"
+	var sourceContentIDs []string
+	var sourceCatalogIDs []string
+	if srcObj.IsDir() {
+		sourceCatalogIDs = append(sourceCatalogIDs, path.Join("root:/", srcObj.GetPath(), srcObj.GetID()))
+	} else {
+		sourceContentIDs = append(sourceContentIDs, path.Join("root:/", srcObj.GetPath(), srcObj.GetID()))
+	}
+
+	destCatalogID := path.Join("root:/", dstDir.GetPath(), dstDir.GetID())
+	log.Debugf("[139Yun Group Copy] srcObj ID: %s, srcObj Path: %s, dstDir ID: %s, dstDir Path: %s, destCatalogID: %s", srcObj.GetID(), srcObj.GetPath(), dstDir.GetID(), dstDir.GetPath(), destCatalogID)
+
+	body := base.Json{
+		"commonAccountInfo": base.Json{
+			"accountType":   "1",
+			"accountUserId": d.ref.UserDomainID,
+		},
+		"destCatalogID":    destCatalogID,
+		"destCloudID":      d.CloudID,
+		"sourceCatalogIDs": sourceCatalogIDs,
+		"sourceCloudID":    d.CloudID,
+		"sourceContentIDs": sourceContentIDs,
+	}
+
+	var resp base.Json
+	_, err := d.andAlbumRequest(pathname, body, &resp)
+	return err
 }
