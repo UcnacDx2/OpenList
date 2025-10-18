@@ -11,6 +11,7 @@ type Addition struct {
 	Username             string `json:"username" required:"true"`
 	Password             string `json:"password" required:"true" secret:"true"`
 	DeviceProfile        string `json:"device_profile" required:"true" type:"text"`
+	MailCookies          string `json:"mail_cookies" required:"true" type:"text" help:"Cookies from mail.139.com, used for login authentication."`
 	driver.RootID
 	Type                 string `json:"type" type:"select" options:"personal_new,family,group,personal" default:"personal_new"`
 	CloudID              string `json:"cloud_id"`

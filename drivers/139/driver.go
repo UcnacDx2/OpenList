@@ -100,22 +100,36 @@ func (d *Yun139) Init(ctx context.Context) error {
 		if len(d.Addition.RootFolderID) == 0 {
 			d.RootFolderID = "root"
 		}
-	case MetaGroup:
-		if len(d.Addition.RootFolderID) == 0 {
-			d.RootFolderID = d.CloudID
-		}
-		_, err := d.groupGetFiles(d.RootFolderID)
-		if err != nil {
-			return err
-		}
-	case MetaFamily:
-		_, err := d.familyGetFiles(d.RootFolderID)
-		if err != nil {
-			return err
-		}
-	default:
-		return errs.NotImplement
-	}
+// ...existing code...
+    case MetaGroup:
+        if len(d.Addition.RootFolderID) == 0 {
+            // 尝试通过查询上层信息（parentCatalogID）获取 root，并持久化
+            if root, err := d.getGroupRootByCloudID(d.CloudID); err == nil && root != "" {
+                d.RootFolderID = root
+                op.MustSaveDriverStorage(d)
+            } else {
+                d.RootFolderID = d.CloudID
+            }
+        }
+        _, err := d.groupGetFiles(d.RootFolderID)
+        if err != nil {
+            return err
+        }
+    case MetaFamily:
+        if len(d.Addition.RootFolderID) == 0 {
+            // 尝试通过查询获得 data.path 作为 root 并持久化
+            if root, err := d.getFamilyRootPath(d.CloudID); err == nil && root != "" {
+                d.RootFolderID = root
+                op.MustSaveDriverStorage(d)
+            }
+        }
+        _, err := d.familyGetFiles(d.RootFolderID)
+        if err != nil {
+            return err
+        }
+    default:
+        return errs.NotImplement
+    }
 	return nil
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
+	crypto_rand "crypto/rand" // Import for secure IV generation
 	"crypto/md5"
 	"crypto/sha1"
 	"encoding/base64"
@@ -15,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"regexp" // Add this import
 	"sort"
 	"strconv"
 	"strings"
@@ -29,6 +31,12 @@ import (
 	"github.com/go-resty/resty/v2"
 	jsoniter "github.com/json-iterator/go"
 	log "github.com/sirupsen/logrus"
+)
+
+// --- 配置常量 ---
+const (
+	KEY_HEX_1 = "73634235495062495331515373756c734e7253306c673d3d" // 第一层 AES 解密密钥
+	KEY_HEX_2 = "7150714477323633586746674c337538" // 第二层 AES 解密密钥
 )
 
 // do others that not defined in Driver interface
@@ -165,21 +173,21 @@ func (d *Yun139) request(url string, method string, callback base.ReqCallback, r
 	}
 	log.Debugf("[139] response body: %s", res.String())
 	if !e.Success {
-	// Always try to unmarshal to the specific response type first if 'resp' is provided.
-	if resp != nil {
-		err = utils.Json.Unmarshal(res.Body(), resp)
-		if err != nil {
-			log.Debugf("[139] failed to unmarshal response to specific type: %v", err)
-			return nil, err // Return unmarshal error
-		}
-		if createBatchOprTaskResp, ok := resp.(*CreateBatchOprTaskResp); ok {
-			log.Debugf("[139] CreateBatchOprTaskResp.Result.ResultCode: %s", createBatchOprTaskResp.Result.ResultCode)
-			if createBatchOprTaskResp.Result.ResultCode == "0" {
-				goto SUCCESS_PROCESS
+		// Always try to unmarshal to the specific response type first if 'resp' is provided.
+		if resp != nil {
+			err = utils.Json.Unmarshal(res.Body(), resp)
+			if err != nil {
+				log.Debugf("[139] failed to unmarshal response to specific type: %v", err)
+				return nil, err // Return unmarshal error
+			}
+			if createBatchOprTaskResp, ok := resp.(*CreateBatchOprTaskResp); ok {
+				log.Debugf("[139] CreateBatchOprTaskResp.Result.ResultCode: %s", createBatchOprTaskResp.Result.ResultCode)
+				if createBatchOprTaskResp.Result.ResultCode == "0" {
+					goto SUCCESS_PROCESS
+				}
 			}
 		}
-	}
-	return nil, errors.New(e.Message) // Fallback to original error if not handled
+		return nil, errors.New(e.Message) // Fallback to original error if not handled
 	}
 	if resp != nil {
 		err = utils.Json.Unmarshal(res.Body(), resp)
@@ -764,91 +772,188 @@ func getMd5(dataStr string) string {
 	return fmt.Sprintf("%x", hash)
 }
 
-func (d *Yun139) step1_password_login(device map[string]interface{}) (string, error) {
-	url := "https://base.hjq.komect.com/base/user/passwdLogin"
+func (d *Yun139) step1_password_login() (string, error) {
+	log.Debugf("--- 执行步骤 1: 登录 API ---")
+	loginURL := "https://mail.10086.cn/Login/Login.ashx"
+
+	// 密码 SHA1 哈希
+	hashedPassword := sha1Hash(fmt.Sprintf("fetion.com.cn:%s", d.Password))
+	log.Debugf("DEBUG: 原始密码: %s", d.Password)
+	log.Debugf("DEBUG: SHA1 输入: fetion.com.cn:%s", d.Password)
+	log.Debugf("DEBUG: 生成的 Password 哈希: %s", hashedPassword)
+
+	cguid := strconv.FormatInt(time.Now().UnixMilli(), 10) // 随机生成 cguid
+
+	loginHeaders := map[string]string{
+		"accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+		"accept-language":           "zh-CN,zh;q=0.9,zh-TW;q=0.8,en-US;q=0.7,en;q=0.6,en-GB;q=0.5",
+		"cache-control":             "max-age=0",
+		"content-type":              "application/x-www-form-urlencoded",
+		"dnt":                       "1",
+		"origin":                    "https://mail.10086.cn",
+		"priority":                  "u=0, i",
+		"referer":                   fmt.Sprintf("https://mail.10086.cn/default.html?&s=1&v=0&u=%s&m=1&ec=S001&resource=indexLogin&clientid=1003&auto=on&cguid=%s&mtime=45", base64.StdEncoding.EncodeToString([]byte(d.Username)), cguid),
+		"sec-ch-ua":                 "\"Microsoft Edge\";v=\"141\", \"Not?A_Brand\";v=\"8\", \"Chromium\";v=\"141\"",
+		"sec-ch-ua-mobile":          "?0",
+		"sec-ch-ua-platform":        "\"Windows\"",
+		"sec-fetch-dest":            "document",
+		"sec-fetch-mode":            "navigate",
+		"sec-fetch-site":            "same-origin",
+		"sec-fetch-user":            "?1",
+		"upgrade-insecure-requests": "1",
+		"user-agent":                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0",
+	    "Cookie":                    d.MailCookies, // 直接用结构体里的字段
+	}
+
+	loginData := url.Values{}
+	loginData.Set("UserName", d.Username)
+	loginData.Set("passOld", "")
+	loginData.Set("auto", "on")
+	loginData.Set("Password", hashedPassword)
+	loginData.Set("webIndexPagePwdLogin", "1")
+	loginData.Set("pwdType", "1")
+	loginData.Set("clientId", "1003")
+	loginData.Set("authType", "2")
+
+	log.Debugf("DEBUG: 登录请求 URL: %s", loginURL)
+	log.Debugf("DEBUG: 登录请求 Headers: %+v", loginHeaders)
+	log.Debugf("DEBUG: 登录请求 Body: %s", loginData.Encode())
+
+	// 设置客户端不跟随重定向
+	client := base.RestyClient.SetRedirectPolicy(resty.NoRedirectPolicy())
+	res, err := client.R().
+		SetHeaders(loginHeaders).
+		SetFormDataFromValues(loginData).
+		Post(loginURL)
+
+	if err != nil {
+		// 如果是重定向错误，则不作为失败处理，因为我们禁止了自动重定向
+		if res != nil && res.StatusCode() >= 300 && res.StatusCode() < 400 {
+			log.Debugf("DEBUG: 登录响应 Status Code: %d (Redirect)", res.StatusCode())
+		} else {
+			return "", fmt.Errorf("step1 login request failed: %w", err)
+		}
+	} else {
+		log.Debugf("DEBUG: 登录响应 Status Code: %d", res.StatusCode())
+	}
+	// 恢复客户端的默认重定向策略，以免影响后续请求
+	base.RestyClient.SetRedirectPolicy(resty.FlexibleRedirectPolicy(10))
+	log.Debugf("DEBUG: 登录响应 Headers: %+v", res.Header())
+
+	var sid, extractedCguid string
+
+	// 从 Location 头部提取 sid 和 cguid
+	locationHeader := res.Header().Get("Location")
+	if locationHeader != "" {
+		sidMatch := regexp.MustCompile(`sid=([^&]+)`).FindStringSubmatch(locationHeader)
+		cguidMatch := regexp.MustCompile(`cguid=([^&]+)`).FindStringSubmatch(locationHeader)
+		if len(sidMatch) > 1 {
+			sid = sidMatch[1]
+			log.Debugf("DEBUG: 从 Location 提取到 sid: %s", sid)
+		}
+		if len(cguidMatch) > 1 {
+			extractedCguid = cguidMatch[1]
+			log.Debugf("DEBUG: 从 Location 提取到 cguid: %s", extractedCguid)
+		}
+	}
+
+	// 如果 Location 中没有，尝试从 Set-Cookie 中提取
+	if sid == "" || extractedCguid == "" {
+		setCookieHeaders := res.Header().Values("Set-Cookie")
+		for _, cookieStr := range setCookieHeaders {
+			ssoSidMatch := regexp.MustCompile(`Os_SSo_Sid=([^;]+)`).FindStringSubmatch(cookieStr)
+			cookieCguidMatch := regexp.MustCompile(`cguid=([^;]+)`).FindStringSubmatch(cookieStr)
+			if len(ssoSidMatch) > 1 && sid == "" {
+				sid = ssoSidMatch[1]
+				log.Debugf("DEBUG: 从 Set-Cookie 提取到 sid: %s", sid)
+			}
+			if len(cookieCguidMatch) > 1 && extractedCguid == "" {
+				extractedCguid = cookieCguidMatch[1]
+				log.Debugf("DEBUG: 从 Set-Cookie 提取到 cguid: %s", extractedCguid)
+			}
+		}
+	}
+
+	if sid == "" || extractedCguid == "" {
+		return "", errors.New("无法从登录响应中提取 sid 或 cguid。")
+	}
+
+	// passId 实际上是 sid
+	return sid, nil
+}
+
+func (d *Yun139) step2_get_single_token(sid string) (string, error) {
+	log.Debugf("\n--- 执行步骤 2: 换artifact API ---")
+	// Python code uses cguid from step 1's Location header, but here we don't have it directly.
+	// For simplicity, we'll use a new cguid for this step, or try to extract it from the session cookies if available.
+	// However, the Python code's cguid extraction from Set-Cookie is for the *login* response, not for subsequent requests.
+	// Let's assume for now that a new cguid is acceptable, or that the sid is sufficient.
+	// The Python code uses the cguid extracted from the login response. Let's try to pass it from step1.
+	// For now, I'll use a dummy cguid, but this might need refinement if the actual cguid from step1 is critical.
+	// Re-reading the Python code, `cguid` is extracted from the login response and used in the referer header for step 1,
+	// and then passed as a query parameter in step 2.
+	// Let's assume `sid` is the primary identifier for this step and `cguid` can be a new timestamp.
+	cguid := strconv.FormatInt(time.Now().UnixMilli(), 10)
+
+	exchangeArtifactURL := fmt.Sprintf("https://smsrebuild1.mail.10086.cn/setting/s?func=%s&sid=%s&cguid=%s", url.QueryEscape("umc:getArtifact"), sid, cguid)
+
+	// 获取 session 中所有的 cookie，并添加到 headers 中
+	// In Go's resty, cookies are managed by the client. We need to manually construct the Cookie header
+	// based on the Python example. The Python example has a hardcoded RMKEY.
+	// For now, I'll use the hardcoded RMKEY and assume other cookies are handled by resty's client.
+	// If session cookies from step 1 are needed, we'd need to extract them from `res.Cookies()` in step 1
+	// and pass them down or store them in the driver.
+	cookieString := "RMKEY=7604aff09e8e5e00" // Python example uses this.
+
+	exchangePassidHeaders := map[string]string{
+		"Host":          "smsrebuild1.mail.10086.cn",
+		"Cookie":        cookieString,
+		"Content-Type":  "text/xml; charset=utf-8",
+		"Accept-Encoding": "gzip",
+		"User-Agent":    "okhttp/4.12.0",
+	}
+
+	log.Debugf("DEBUG: 换passid 请求 URL: %s", exchangeArtifactURL)
+	log.Debugf("DEBUG: 换passid 请求 Headers: %+v", exchangePassidHeaders)
+
+	res, err := base.RestyClient.R().
+		SetHeaders(exchangePassidHeaders).
+		Post(exchangeArtifactURL)
+
+	if err != nil {
+		return "", fmt.Errorf("step2 exchange artifact request failed: %w", err)
+	}
+
+	log.Debugf("DEBUG: 换passid 响应 Status Code: %d", res.StatusCode())
+	log.Debugf("DEBUG: 换passid 响应 Headers: %+v", res.Header())
+	log.Debugf("DEBUG: 换passid 响应 Body: %s...", res.String()[:min(len(res.String()), 500)])
+
+	dycpwd := jsoniter.Get(res.Body(), "var", "artifact").ToString()
+	if dycpwd == "" {
+		return "", errors.New("无法从换passid响应中提取 dycpwd。")
+	}
+	log.Debugf("DEBUG: 提取到 dycpwd: %s", dycpwd)
+
+	return dycpwd, nil
+}
+
+// --- 辅助函数：加密/解密 ---
+
+// sha1Hash 计算 SHA1 哈希值，返回十六进制字符串。
+func sha1Hash(data string) string {
 	h := sha1.New()
-	h.Write([]byte("fetion.com.cn:" + d.Password))
-	authdata := fmt.Sprintf("%x", h.Sum(nil))
-	virtual_authdata := getMd5(d.Password)
-	
-	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
-
-	body := base.Json{
-		"loginType":       "UNIAUTH_PASSWORD",
-		"phoneID":         device["phone_id"],
-		"phoneModel":      device["phone_model"],
-		"virtualAuthdata": virtual_authdata,
-		"phoneBrand":      device["phone_brand"],
-		"authType":        "10",
-		"timestamp":       ts,
-		"deviceUuid":      device["device_uuid"],
-		"os":              "android",
-		"phoneNumber":     d.Username,
-		"userAccount":     d.Username,
-		"authdata":        authdata,
-		"appid":           "01010811",
-		"wifiMac":         device["mac_address"],
-	}
-	
-	var resp base.Json
-	res, err := base.RestyClient.R().
-		SetHeaders(map[string]string{
-			"version":      device["app_version"].(string),
-			"OS":           "2",
-			"OSVersion":    device["android_version"].(string),
-			"phoneType":    device["phone_type"].(string),
-			"User-Agent":   "UniApp;HjqAppCategory/Phone",
-			"Content-Type": "application/json; charset=UTF-8",
-		}).
-		SetBody(body).
-		SetResult(&resp).
-		Post(url)
-
-	if err != nil {
-		return "", err
-	}
-	
-	passId := utils.Json.Get(res.Body(), "data", "passId").ToString()
-	if passId == "" {
-		return "", fmt.Errorf("step1 failed: %s", utils.Json.Get(res.Body(), "message").ToString())
-	}
-	return passId, nil
+	h.Write([]byte(data))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
-func (d *Yun139) step2_get_single_token(passId string, device map[string]interface{}) (string, error) {
-	url := fmt.Sprintf("https://base.hjq.komect.com/login/user/getSingleToken/%s", passId)
-	var resp base.Json
-	res, err := base.RestyClient.R().
-		SetHeaders(map[string]string{
-			"version":      device["app_version"].(string),
-			"OS":           "2",
-			"OSVersion":    device["android_version"].(string),
-			"phoneType":    device["phone_type"].(string),
-			"User-Agent":   "UniApp;HjqAppCategory/Phone",
-			"Content-Type": "application/json; charset=UTF-8",
-		}).
-		SetBody("{}").
-		SetResult(&resp).
-		Post(url)
-
-	if err != nil {
-		return "", err
-	}
-
-	token := utils.Json.Get(res.Body(), "data", "token").ToString()
-	if token == "" {
-		return "", fmt.Errorf("step2 failed: token is empty")
-	}
-	return token, nil
+// pkcs7_pad PKCS7 填充
+func pkcs7_pad(data []byte, blockSize int) []byte {
+	padder := bytes.Repeat([]byte{byte(blockSize - len(data)%blockSize)}, blockSize-len(data)%blockSize)
+	return append(data, padder...)
 }
 
-func pkcs7Pad(data []byte, blockSize int) []byte {
-	padding := blockSize - len(data)%blockSize
-	padText := bytes.Repeat([]byte{byte(padding)}, padding)
-	return append(data, padText...)
-}
-
-func pkcs7Unpad(data []byte) ([]byte, error) {
+// pkcs7_unpad PKCS7 去填充
+func pkcs7_unpad(data []byte) ([]byte, error) {
 	length := len(data)
 	if length == 0 {
 		return nil, errors.New("pkcs7: data is empty")
@@ -860,139 +965,278 @@ func pkcs7Unpad(data []byte) ([]byte, error) {
 	return data[:(length - unpadding)], nil
 }
 
-func aesCbcEncrypt(data, key, iv []byte) ([]byte, error) {
+// aes_cbc_decrypt AES/CBC/Pkcs7 解密，输入为 Base64 编码的密文。
+// 密文的前 16 字节 (32 个十六进制字符) 是 IV。
+func aes_cbc_decrypt(ciphertextWithIV []byte, key []byte) ([]byte, error) {
 	block, err := aes.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
-	data = pkcs7Pad(data, block.BlockSize())
-	encrypted := make([]byte, len(data))
-	mode := cipher.NewCBCEncrypter(block, iv)
-	mode.CryptBlocks(encrypted, data)
-	return encrypted, nil
-}
 
-func aesCbcDecrypt(data, key, iv []byte) ([]byte, error) {
-	block, err := aes.NewCipher(key)
-	if err != nil {
-		return nil, err
+	blockSize := block.BlockSize()
+	if len(ciphertextWithIV) < blockSize {
+		return nil, errors.New("AES CBC decrypt: ciphertext is too short to contain IV")
 	}
-	if len(data)%block.BlockSize() != 0 {
-		return nil, errors.New("ciphertext is not a multiple of the block size")
+
+	iv := ciphertextWithIV[:blockSize]
+	ciphertext := ciphertextWithIV[blockSize:]
+
+	if len(ciphertext)%blockSize != 0 {
+		return nil, errors.New("AES CBC decrypt: ciphertext is not a multiple of the block size")
 	}
+
 	mode := cipher.NewCBCDecrypter(block, iv)
-	decrypted := make([]byte, len(data))
-	mode.CryptBlocks(decrypted, data)
-	return pkcs7Unpad(decrypted)
+	decrypted := make([]byte, len(ciphertext))
+	mode.CryptBlocks(decrypted, ciphertext)
+
+	return pkcs7_unpad(decrypted)
 }
 
-func (d *Yun139) step3_third_party_login(token string, device map[string]interface{}) (string, error) {
-	const URL = "https://user-njs.yun.139.com/user/thirdlogin"
-	var err error
-	var finalJsonBytes []byte
+// aes_ecb_decrypt AES/ECB/Pkcs7 解密，输入为十六进制字符串。
+func aes_ecb_decrypt(ciphertext []byte, key []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
 
-	key1, _ := hex.DecodeString("73634235495062495331515373756c734e7253306c673d3d")
-	key2, _ := hex.DecodeString("7150714477323633586746674c337538")
-	iv := []byte(random.String(16))
+	if len(ciphertext)%block.BlockSize() != 0 {
+		return nil, errors.New("AES ECB decrypt: ciphertext is not a multiple of the block size")
+	}
 
-	h := sha1.New()
-	h.Write([]byte("fetion.com.cn:" + token))
-	secinfo := strings.ToUpper(fmt.Sprintf("%x", h.Sum(nil)))
+	decrypted := make([]byte, len(ciphertext))
+	blockSize := block.BlockSize()
 
-	plainJson := base.Json{
-		"clientkey_decrypt": "hejiaqin#2020#la#84dE23LT^%d9",
-		"clienttype":        "673",
-		"cpid":              "295",
-		"dycpwd":            token,
+	for bs, be := 0, blockSize; bs < len(ciphertext); bs, be = bs+blockSize, be+blockSize {
+		block.Decrypt(decrypted[bs:be], ciphertext[bs:be])
+	}
+
+	return pkcs7_unpad(decrypted)
+}
+
+// aes_cbc_encrypt AES/CBC/Pkcs7 加密，返回 Base64 编码的密文 (包含 IV)。
+func aes_cbc_encrypt(plaintext []byte, key []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+
+	iv := make([]byte, block.BlockSize())
+	if _, err := io.ReadFull(crypto_rand.Reader, iv); err != nil { // Use crypto/rand for secure IV
+		return nil, err
+	}
+
+	paddedData := pkcs7_pad(plaintext, block.BlockSize())
+	ciphertext := make([]byte, len(paddedData))
+	mode := cipher.NewCBCEncrypter(block, iv)
+	mode.CryptBlocks(ciphertext, paddedData)
+
+	// Prepend IV to ciphertext
+	return append(iv, ciphertext...), nil
+}
+
+// 以下提供 camelCase 的 AES CBC 加解密，供文件中其它位置调用（并支持传入 IV）。
+func aesCbcEncrypt(plaintext []byte, key []byte, iv []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(iv) != block.BlockSize() {
+		return nil, fmt.Errorf("aesCbcEncrypt: iv length %d does not match block size %d", len(iv), block.BlockSize())
+	}
+	padded := pkcs7_pad(plaintext, block.BlockSize())
+	ciphertext := make([]byte, len(padded))
+	mode := cipher.NewCBCEncrypter(block, iv)
+	mode.CryptBlocks(ciphertext, padded)
+	return ciphertext, nil
+}
+
+func aesCbcDecrypt(ciphertext []byte, key []byte, iv []byte) ([]byte, error) {
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		return nil, err
+	}
+	if len(iv) != block.BlockSize() {
+		return nil, fmt.Errorf("aesCbcDecrypt: iv length %d does not match block size %d", len(iv), block.BlockSize())
+	}
+	if len(ciphertext)%block.BlockSize() != 0 {
+		return nil, errors.New("aesCbcDecrypt: ciphertext is not a multiple of the block size")
+	}
+	decrypted := make([]byte, len(ciphertext))
+	mode := cipher.NewCBCDecrypter(block, iv)
+	mode.CryptBlocks(decrypted, ciphertext)
+	return pkcs7_unpad(decrypted)
+}
+
+// sortedJsonStringify 对 JSON 对象进行排序并字符串化，模拟 Apifox 脚本行为。
+func sortedJsonStringify(obj interface{}) (string, error) {
+	if obj == nil {
+		return "null", nil
+	}
+
+	switch v := obj.(type) {
+	case string:
+		// 尝试解析为 JSON，如果成功则递归处理
+		var parsed interface{}
+		if err := jsoniter.Unmarshal([]byte(v), &parsed); err == nil {
+			return sortedJsonStringify(parsed)
+		}
+		// 如果不是 JSON 字符串，则直接返回 JSON 字符串化的结果
+		return jsoniter.MarshalToString(v)
+	case int, float64, bool:
+		return fmt.Sprintf("%v", v), nil
+	case []interface{}:
+		var items []string
+		for _, item := range v {
+			s, err := sortedJsonStringify(item)
+			if err != nil {
+				return "", err
+			}
+			items = append(items, s)
+		}
+		return fmt.Sprintf("[%s]", strings.Join(items, ",")), nil
+	case map[string]interface{}:
+		sortedKeys := make([]string, 0, len(v))
+		for key := range v {
+			sortedKeys = append(sortedKeys, key)
+		}
+		sort.Strings(sortedKeys)
+
+		var pairs []string
+		for _, key := range sortedKeys {
+			value := v[key]
+			s, err := sortedJsonStringify(value)
+			if err != nil {
+				return "", err
+			}
+			// Use jsoniter.MarshalToString for the key to ensure it's quoted correctly
+			keyStr, err := jsoniter.MarshalToString(key)
+			if err != nil {
+				return "", err
+			}
+			pairs = append(pairs, fmt.Sprintf("%s:%s", keyStr, s))
+		}
+		return fmt.Sprintf("{%s}", strings.Join(pairs, ",")), nil
+	default:
+		// Fallback for other types, e.g., numbers, booleans, or unhandled complex types
+		// Use jsoniter's default marshalling for these
+		return jsoniter.MarshalToString(v)
+	}
+}
+
+func (d *Yun139) step3_third_party_login(dycpwd string, device map[string]interface{}) (string, error) {
+	log.Debugf("\n--- 执行步骤 3: 单点登录 API ---")
+	ssoLoginURL := "https://user-njs.yun.139.com/user/thirdlogin"
+
+	key1, err := hex.DecodeString(KEY_HEX_1)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode KEY_HEX_1: %w", err)
+	}
+	key2, err := hex.DecodeString(KEY_HEX_2)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode KEY_HEX_2: %w", err)
+	}
+
+	// 构建原始请求体
+	ssoRequestBodyRaw := base.Json{
+		"clientkey_decrypt": "l3TryM&Q+X7@dzwk)qP",
+		"clienttype":        "886",
+		"cpid":              "507",
+		"dycpwd":            dycpwd,
 		"extInfo":           base.Json{"ifOpenAccount": "0"},
 		"loginMode":         "0",
 		"msisdn":            d.Username,
 		"pintype":           "13",
-		"secinfo":           secinfo,
-		"version":           "9.9.0",
+		"secinfo":           strings.ToUpper(sha1Hash(fmt.Sprintf("fetion.com.cn:%s", dycpwd))),
+		"version":           "20250901",
 	}
 
-	sortedJson, err := sortedJsonStringify(plainJson)
+	// 排序并字符串化 JSON
+	sortedJsonStr, err := sortedJsonStringify(ssoRequestBodyRaw)
 	if err != nil {
 		return "", fmt.Errorf("step3 failed to stringify json: %w", err)
 	}
+	log.Debugf("DEBUG: 单点登录原始请求体 (排序后): %s", sortedJsonStr)
 
-	encrypted, err := aesCbcEncrypt([]byte(sortedJson), key1, iv)
+	// AES/CBC/Pkcs7 加密请求体
+	encryptedPayloadBytes, err := aes_cbc_encrypt([]byte(sortedJsonStr), key1)
 	if err != nil {
-		return "", fmt.Errorf("step3 aes encrypt failed: %w", err)
+		return "", fmt.Errorf("step3 aes cbc encrypt failed: %w", err)
+	}
+	encryptedPayload := base64.StdEncoding.EncodeToString(encryptedPayloadBytes)
+	log.Debugf("DEBUG: AES/CBC 加密输出 (Base64): %s...", encryptedPayload[:min(len(encryptedPayload), 50)])
+
+	ssoLoginHeaders := map[string]string{
+		"hcy-cool-flag":       "1",
+		"x-huawei-channelSrc": "10246600",
+		"x-sdk-channelSrc":    "",
+		"x-MM-Source":         "0",
+		"x-UserAgent":         "android|22081212C|android15|1.2.6|||1220x2574|10246600",
+		"x-DeviceInfo":        "4|127.0.0.1|5|1.2.6|Xiaomi|22081212C|23dd1e310d84c3ff48634f05bbdc25e65|02-00-00-00-00-00|android 15|1220x2574|android|||",
+		"Content-Type":        "text/plain;charset=UTF-8", // Apifox 脚本中会修改此头部
+		"Host":                "user-njs.yun.139.com",
+		"Connection":          "Keep-Alive",
+		"Accept-Encoding":     "gzip",
+		"User-Agent":          "okhttp/3.12.2",
 	}
 
-	payload := base64.StdEncoding.EncodeToString(append(iv, encrypted...))
+	log.Debugf("DEBUG: 单点登录请求 URL: %s", ssoLoginURL)
+	log.Debugf("DEBUG: 单点登录请求 Headers: %+v", ssoLoginHeaders)
+	log.Debugf("DEBUG: 单点登录请求 Body (加密后): %s...", encryptedPayload[:min(len(encryptedPayload), 50)])
 
-	var respBody []byte
 	res, err := base.RestyClient.R().
-		SetHeaders(map[string]string{
-			"Host":                "user-njs.yun.139.com",
-			"hcy-cool-flag":       "1",
-			"x-huawei-channelsrc": "10214502",
-			"x-mm-source":         "0",
-			"x-useragent":         fmt.Sprintf("androidsdk|%s|android%s|6.1.1.0|||1220x2574|", device["phone_type"], device["android_version"]),
-			"x-deviceinfo":        fmt.Sprintf("1|127.0.0.1|5|6.1.1.0|%s|%s|%s|android %s|1220x2574|android|||", device["phone_brand"], device["phone_type"], device["device_uuid"], device["android_version"]),
-			"content-type":        "application/json; charset=utf-8",
-			"user-agent":          "okhttp/4.11.0",
-		}).
-		SetBody(payload).
-		Post(URL)
+		SetHeaders(ssoLoginHeaders).
+		SetBody(encryptedPayload).
+		Post(ssoLoginURL)
 
 	if err != nil {
-		return "", err
-	}
-	respBody = res.Body()
-
-	log.Debugf("Step 3 Raw Response: %s", string(respBody))
-
-	// Check if the response is a JSON error
-	if len(respBody) > 0 && respBody[0] == '{' {
-		var errorResp BaseResp
-		if err := utils.Json.Unmarshal(respBody, &errorResp); err == nil && !errorResp.Success {
-			return "", fmt.Errorf("step3 failed with server error: %s", errorResp.Message)
-		}
+		return "", fmt.Errorf("step3 sso login request failed: %w", err)
 	}
 
-	// Layer 1 Decryption
-	decoded, err := base64.StdEncoding.DecodeString(string(respBody))
+	log.Debugf("DEBUG: 单点登录响应 Status Code: %d", res.StatusCode())
+	log.Debugf("DEBUG: 单点登录响应 Headers: %+v", res.Header())
+	log.Debugf("DEBUG: 单点登录响应 Body (原始密文): %s...", res.String()[:min(len(res.String()), 500)])
+
+	// 第一层解密
+	decryptedLayer1Bytes, err := base64.StdEncoding.DecodeString(res.String())
 	if err != nil {
-		return "", fmt.Errorf("step3 response base64 decode failed: %w. Raw response: %s", err, string(respBody))
+		return "", fmt.Errorf("step3 response base64 decode failed: %w", err)
 	}
-	resIv := decoded[:16]
-	resCiphertext := decoded[16:]
-	decryptedL1, err := aesCbcDecrypt(resCiphertext, key1, resIv)
+	decryptedLayer1StrBytes, err := aes_cbc_decrypt(decryptedLayer1Bytes, key1)
 	if err != nil {
-		return "", fmt.Errorf("step3 response layer1 aes decrypt failed: %w", err)
+		return "", fmt.Errorf("step3 response layer1 aes cbc decrypt failed: %w", err)
 	}
+	log.Debugf("DEBUG: AES/CBC 解密输出 (UTF-8): %s...", string(decryptedLayer1StrBytes)[:min(len(decryptedLayer1StrBytes), 100)])
 
-	hexInner := utils.Json.Get(decryptedL1, "data").ToString()
+	hexInner := jsoniter.Get(decryptedLayer1StrBytes, "data").ToString()
 	if hexInner == "" {
-		return "", errors.New("step3 first layer decrypt failed: data is empty")
+		return "", errors.New("第一层解密结果中缺少 'data' 字段。")
 	}
+	log.Debugf("DEBUG: 第一层解密提取到 hex_inner: %s...", hexInner[:min(len(hexInner), 50)])
 
-	// The provided JS code for layer 2 is AES-ECB, which doesn't use an IV.
-	hexInnerBytes, _ := hex.DecodeString(hexInner)
-
-	block, err := aes.NewCipher(key2)
+	// 第二层解密
+	hexInnerBytes, err := hex.DecodeString(hexInner)
 	if err != nil {
-		return "", fmt.Errorf("step3 failed to create cipher for layer2: %w", err)
+		return "", fmt.Errorf("failed to decode hex_inner: %w", err)
 	}
-	decryptedL2 := make([]byte, len(hexInnerBytes))
-	size := block.BlockSize()
-	for bs, be := 0, size; bs < len(hexInnerBytes); bs, be = bs+size, be+size {
-		block.Decrypt(decryptedL2[bs:be], hexInnerBytes[bs:be])
-	}
-	finalJsonBytes, err = pkcs7Unpad(decryptedL2)
+	finalJsonStrBytes, err := aes_ecb_decrypt(hexInnerBytes, key2)
 	if err != nil {
-		return "", fmt.Errorf("step3 second layer pkcs7 unpad failed: %w", err)
+		return "", fmt.Errorf("step3 response layer2 aes ecb decrypt failed: %w", err)
 	}
+	log.Debugf("DEBUG: 最终解密结果: %s", string(finalJsonStrBytes))
 
-	account := utils.Json.Get(finalJsonBytes, "account").ToString()
-	authToken := utils.Json.Get(finalJsonBytes, "authToken").ToString()
-	userDomainId := utils.Json.Get(finalJsonBytes, "userDomainId").ToString()
-	if account == "" || authToken == "" || userDomainId == "" {
-		return "", errors.New("step3 final decrypt failed: account, authToken or userDomainId is empty")
+	// 提取 authToken
+	authToken := jsoniter.Get(finalJsonStrBytes, "authToken").ToString()
+	if authToken == "" {
+		return "", errors.New("无法从最终解密结果中提取 authToken。")
+	}
+	log.Debugf("DEBUG: 提取到 authToken: %s", authToken)
+
+	// 提取 account 和 userDomainId
+	account := jsoniter.Get(finalJsonStrBytes, "account").ToString()
+	userDomainId := jsoniter.Get(finalJsonStrBytes, "userDomainId").ToString()
+
+	if account == "" || userDomainId == "" {
+		return "", errors.New("无法从最终解密结果中提取 account 或 userDomainId。")
 	}
 
 	d.UserDomainID = userDomainId
@@ -1002,28 +1246,28 @@ func (d *Yun139) step3_third_party_login(token string, device map[string]interfa
 
 
 func (d *Yun139) loginWithPassword() (string, error) {
-	if d.Username == "" || d.Password == "" || d.DeviceProfile == "" {
-		return "", errors.New("username, password or device_profile is empty")
+	if d.Username == "" || d.Password == "" || d.MailCookies == "" {
+		return "", errors.New("username, password or mail_cookies is empty")
 	}
 
-	var device map[string]interface{}
-	err := utils.Json.UnmarshalFromString(d.DeviceProfile, &device)
-	if err != nil {
-		return "", fmt.Errorf("failed to parse device_profile: %w", err)
-	}
-
-	passId, err := d.step1_password_login(device)
+	passId, err := d.step1_password_login()
 	if err != nil {
 		return "", err
 	}
 	log.Infof("Step 1 success, passId: %s", passId)
 
-	token, err := d.step2_get_single_token(passId, device)
+	token, err := d.step2_get_single_token(passId)
 	if err != nil {
 		return "", err
 	}
 	log.Infof("Step 2 success, token: %s", token)
 
+
+	var device map[string]interface{}
+	err = utils.Json.UnmarshalFromString(d.DeviceProfile, &device)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse device_profile: %w", err)
+	}
 	newAuth, err := d.step3_third_party_login(token, device)
 	if err != nil {
 		return "", err
@@ -1038,16 +1282,6 @@ func (d *Yun139) loginWithPassword() (string, error) {
 
 
 var andAlbumAesKey, _ = hex.DecodeString("73634235495062495331515373756c734e7253306c673d3d") // Corrected AES key
-
-// sortedJsonStringify recursively sorts keys of maps within the data and then marshals to a JSON string.
-func sortedJsonStringify(data interface{}) (string, error) {
-	// For the known structures, jsoniter's SortMapKeys should suffice.
-	json := jsoniter.Config{
-		SortMapKeys: true,
-	}.Froze()
-	res, err := json.MarshalToString(data)
-	return res, err
-}
 
 func (d *Yun139) andAlbumRequest(pathname string, body interface{}, resp interface{}) ([]byte, error) {
 	url := "https://group.yun.139.com/hcy/family/adapter/andAlbum/openApi" + pathname
@@ -1186,3 +1420,95 @@ func (d *Yun139) handleMetaGroupCopy(ctx context.Context, srcObj, dstDir model.O
 	_, err := d.andAlbumRequest(pathname, body, &resp)
 	return err
 }
+
+// ...existing code...
+// getGroupRootByCloudID 查询 group 上层信息，优先返回 parentCatalogID，回退到 catalogList[0].path
+func (d *Yun139) getGroupRootByCloudID(cloudID string) (string, error) {
+    pathname := "/orchestration/group-rebuild/catalog/v1.0/queryGroupContentList"
+    body := base.Json{
+        "groupID": cloudID,
+        "commonAccountInfo": base.Json{
+            "account":     d.getAccount(),
+            "accountType": 1,
+        },
+        "pageInfo": base.Json{
+            "pageNum":  1,
+            "pageSize": 1,
+        },
+    }
+    var resp base.Json
+    _, err := d.post(pathname, body, &resp)
+    if err != nil {
+        return "", err
+    }
+    dataObj, _ := resp["data"].(map[string]interface{})
+    if dataObj == nil {
+        return "", fmt.Errorf("invalid group response data")
+    }
+    if gcr, ok := dataObj["getGroupContentResult"].(map[string]interface{}); ok {
+        if pid, ok := gcr["parentCatalogID"].(string); ok && pid != "" {
+            return pid, nil
+        }
+        if cl, ok := gcr["catalogList"].([]interface{}); ok && len(cl) > 0 {
+            if first, ok := cl[0].(map[string]interface{}); ok {
+                if p, ok := first["path"].(string); ok && p != "" {
+                    return p, nil
+                }
+            }
+        }
+    }
+    return "", fmt.Errorf("no root found in group response")
+}
+
+// ...existing code...
+// getFamilyRootPath 查询 family 的上层 path（data.path）
+// 返回值已去除前缀 "root:/"（或 "root:"），直接返回纯 ID 或 path 部分，便于持久化为 RootFolderID。
+func (d *Yun139) getFamilyRootPath(cloudID string) (string, error) {
+    // 使用 v1.2 接口（代码日志中已有该请求），pageSize 取 1 足够获取 path 字段
+    pathname := "/orchestration/familyCloud-rebuild/content/v1.2/queryContentList"
+    body := base.Json{
+        "catalogID":   "",
+        "catalogType": 3,
+        "cloudID":     cloudID,
+        "cloudType":   1,
+        "commonAccountInfo": base.Json{
+            "account":     d.getAccount(),
+            "accountType": 1,
+        },
+        "contentSortType": 0,
+        "pageInfo": base.Json{
+            "pageNum":  1,
+            "pageSize": 1,
+        },
+        "sortDirection": 1,
+    }
+    var resp base.Json
+    _, err := d.post(pathname, body, &resp)
+    if err != nil {
+        return "", err
+    }
+    dataObj, _ := resp["data"].(map[string]interface{})
+    if dataObj == nil {
+        return "", fmt.Errorf("invalid family response data")
+    }
+    // helper to strip "root:/" or "root:" prefix
+    stripRoot := func(s string) string {
+        s = strings.TrimSpace(s)
+        s = strings.TrimPrefix(s, "root:/")
+        s = strings.TrimPrefix(s, "root:")
+        return s
+    }
+    if p, ok := dataObj["path"].(string); ok && p != "" {
+        return stripRoot(p), nil
+    }
+    // 回退：有时 path 在 cloudCatalogList.catalogList 中
+    if cl, ok := dataObj["cloudCatalogList"].([]interface{}); ok && len(cl) > 0 {
+        if first, ok := cl[0].(map[string]interface{}); ok {
+            if p, ok := first["path"].(string); ok && p != "" {
+                return stripRoot(p), nil
+            }
+        }
+    }
+    return "", fmt.Errorf("no path found in family response")
+}
+// ...existing code...
