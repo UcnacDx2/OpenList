@@ -760,6 +760,10 @@ func getMd5(dataStr string) string {
 // This is necessary because the login endpoint requires a specific cookie order and
 // rejects unknown cookies. The function ensures that only necessary cookies are sent,
 // preventing potential login failures due to cookie changes by the service.
+// Authentication tokens such as "a_l" and "a_l2" are intentionally excluded from
+// the allowlist. Including old tokens in the login request can trigger security
+// protection mechanisms, leading to login failures. By filtering them out, we ensure
+// that only fresh tokens from the login process are used.
 func sanitizeLoginCookies(existingCookies string, newJSessionID string) string {
 	orderedCookieNames := []string{
 		"behaviorid",
@@ -916,7 +920,7 @@ func (d *Yun139) step1_password_login() (string, error) {
 			sid = sidMatch[1]
 			log.Debugf("DEBUG: 从 Location 提取到 sid: %s", sid)
 		} else if strings.Contains(locationHeader, "default.html") {
-			return "", errors.New("authentication failed: sid is missing in default.html redirect")
+			return "", errors.New("authentication failed: sid is missing in default.html redirect. This may be due to invalid credentials, expired cookies, or other security measures")
 		}
 
 		if len(cguidMatch) > 1 {
@@ -961,10 +965,15 @@ func (d *Yun139) step1_password_login() (string, error) {
 	for _, cookie := range res.Cookies() {
 		existingCookiesMap[cookie.Name] = cookie.Value
 	}
-	// 3. Rebuild the cookie string. The order doesn't matter here, as sanitizeLoginCookies will reorder it later if needed.
+	// 3. Rebuild the cookie string by sorting the keys for deterministic order.
+	keys := make([]string, 0, len(existingCookiesMap))
+	for k := range existingCookiesMap {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
 	var finalCookieParts []string
-	for name, value := range existingCookiesMap {
-		finalCookieParts = append(finalCookieParts, name+"="+value)
+	for _, name := range keys {
+		finalCookieParts = append(finalCookieParts, name+"="+existingCookiesMap[name])
 	}
 	d.MailCookies = strings.Join(finalCookieParts, "; ")
 	log.Debugf("DEBUG: 更新后的 Cookies: %s", d.MailCookies)
@@ -1321,9 +1330,20 @@ func (d *Yun139) step3_third_party_login(dycpwd string) (string, error) {
 	return newAuthorization, nil
 }
 
+func getCookieValue(cookies, name string) string {
+	for _, cookie := range strings.Split(cookies, ";") {
+		cookie = strings.TrimSpace(cookie)
+		if strings.HasPrefix(cookie, name+"=") {
+			return strings.TrimPrefix(cookie, name+"=")
+		}
+	}
+	return ""
+}
+
 func (d *Yun139) preAuthLogin() (bool, error) {
-	if !strings.Contains(d.MailCookies, "a_l2") {
-		return false, nil // No token, so can't do pre-auth
+	// Check for the existence of "a_l2" and ensure it has a non-empty value.
+	if getCookieValue(d.MailCookies, "a_l2") == "" {
+		return false, nil // No valid token, so can't do pre-auth
 	}
 
 	client := resty.New().SetRedirectPolicy(resty.NoRedirectPolicy())
@@ -1338,6 +1358,10 @@ func (d *Yun139) preAuthLogin() (bool, error) {
 		if !strings.HasSuffix(err.Error(), "auto redirect is disabled") {
 			return false, fmt.Errorf("pre-auth request failed: %w", err)
 		}
+	}
+
+	if resp == nil {
+		return false, fmt.Errorf("pre-auth request failed: response is nil (error: %v)", err)
 	}
 
 	if resp.StatusCode() == 302 {

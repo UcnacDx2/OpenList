@@ -47,7 +47,8 @@ func (d *Yun139) Init(ctx context.Context) error {
 		trimmedCookies := strings.TrimSpace(d.MailCookies)
 		if trimmedCookies != "" {
 			d.MailCookies = trimmedCookies // Update with trimmed value
-			if !strings.Contains(d.MailCookies, "=") || len(strings.Split(d.MailCookies, "=")[0]) == 0 {
+			parts := strings.SplitN(d.MailCookies, "=", 2)
+			if len(parts) != 2 || parts[0] == "" {
 				return fmt.Errorf("MailCookies format is invalid, please check your configuration")
 			}
 		}
