@@ -762,57 +762,60 @@ func getMd5(dataStr string) string {
 }
 
 func sanitizeLoginCookies(existingCookies string, newJSessionID string) string {
-	allowedCookieNames := map[string]bool{
-		"behaviorid":             true,
-		"Os_SSo_Sid":             true,
-		"_139_index_isLoginType": true,
-		"_139_login_version":     true,
-		"Login_UserNumber":       true,
-		"cookiepartid8011":       true,
-		"_139_login_agreement":   true,
-		"UserData":               true,
-		"rmUin8011":              true,
-		"cookiepartid":           true,
-		"UUIDToken":              true,
-		"SkinPath28011":          true,
-		"cbauto":                 true,
-		"areaCode8011":           true,
-		"cookieLen":              true,
-		"DEVICE_INFO_DIGEST":     true,
-		"loginProcessFlag":       true,
-		"provCode8011":           true,
-		"S_DEVICE_TOKEN":         true,
-		"taskIdCloud":            true,
-		"UserNowState":           true,
-		"UserNowState8011":       true,
-		"ut8011":                 true,
+	orderedCookieNames := []string{
+		"behaviorid",
+		"Os_SSo_Sid",
+		"_139_index_isLoginType",
+		"_139_login_version",
+		"Login_UserNumber",
+		"cookiepartid8011",
+		"_139_login_agreement",
+		"UserData",
+		"rmUin8011",
+		"cookiepartid",
+		"UUIDToken",
+		"SkinPath28011",
+		"cbauto",
+		"areaCode8011",
+		"cookieLen",
+		"DEVICE_INFO_DIGEST",
+		"JSESSIONID",
+		"loginProcessFlag",
+		"provCode8011",
+		"S_DEVICE_TOKEN",
+		"taskIdCloud",
+		"UserNowState",
+		"UserNowState8011",
+		"ut8011",
 	}
 
-	finalCookies := make(map[string]string)
-
+	// Store existing cookies in a map for easy lookup
+	existingCookiesMap := make(map[string]string)
 	cookies := strings.Split(existingCookies, ";")
 	for _, cookie := range cookies {
 		cookie = strings.TrimSpace(cookie)
 		parts := strings.SplitN(cookie, "=", 2)
 		if len(parts) == 2 {
-			name := parts[0]
-			value := parts[1]
-			if allowedCookieNames[name] {
-				finalCookies[name] = value
-			}
+			existingCookiesMap[parts[0]] = parts[1]
 		}
 	}
 
-	if newJSessionID != "" {
-		finalCookies["JSESSIONID"] = newJSessionID
+	var finalCookieParts []string
+	// Iterate through the ordered names and build the final cookie string
+	for _, name := range orderedCookieNames {
+		if name == "JSESSIONID" {
+			if newJSessionID != "" {
+				finalCookieParts = append(finalCookieParts, name+"="+newJSessionID)
+			}
+			continue
+		}
+
+		if value, ok := existingCookiesMap[name]; ok {
+			finalCookieParts = append(finalCookieParts, name+"="+value)
+		}
 	}
 
-	var cookieParts []string
-	for name, value := range finalCookies {
-		cookieParts = append(cookieParts, name+"="+value)
-	}
-
-	return strings.Join(cookieParts, "; ")
+	return strings.Join(finalCookieParts, "; ")
 }
 
 func (d *Yun139) step1_password_login() (string, error) {
