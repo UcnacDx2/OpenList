@@ -171,29 +171,24 @@ func (d *Yun139) request(url string, method string, callback base.ReqCallback, r
 	}
 	log.Debugf("[139] response body: %s", res.String())
 	if !e.Success {
-		// Always try to unmarshal to the specific response type first if 'resp' is provided.
 		if resp != nil {
-			err = utils.Json.Unmarshal(res.Body(), resp)
-			if err != nil {
-				log.Debugf("[139] failed to unmarshal response to specific type: %v", err)
-				return nil, err // Return unmarshal error
-			}
-			if createBatchOprTaskResp, ok := resp.(*CreateBatchOprTaskResp); ok {
-				log.Debugf("[139] CreateBatchOprTaskResp.Result.ResultCode: %s", createBatchOprTaskResp.Result.ResultCode)
-				if createBatchOprTaskResp.Result.ResultCode == "0" {
-					goto SUCCESS_PROCESS
+			// Attempt to unmarshal to see if it contains the special success code.
+			if err := utils.Json.Unmarshal(res.Body(), resp); err == nil {
+				if taskResp, ok := resp.(*CreateBatchOprTaskResp); ok {
+					if taskResp.Result.ResultCode == "0" {
+						return res.Body(), nil
+					}
 				}
 			}
 		}
-		return nil, errors.New(e.Message) // Fallback to original error if not handled
+		return nil, errors.New(e.Message)
 	}
+
 	if resp != nil {
-		err = utils.Json.Unmarshal(res.Body(), resp)
-		if err != nil {
+		if err := utils.Json.Unmarshal(res.Body(), resp); err != nil {
 			return nil, err
 		}
 	}
-SUCCESS_PROCESS:
 	return res.Body(), nil
 }
 
