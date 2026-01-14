@@ -47,18 +47,20 @@ func (d *Yun139) Init(ctx context.Context) error {
 		trimmedCookies := strings.TrimSpace(d.MailCookies)
 		if trimmedCookies != "" {
 			d.MailCookies = trimmedCookies // Update with trimmed value
-			if !strings.Contains(d.MailCookies, "=") || len(strings.Split(d.MailCookies, "=")[0]) {
+			if !strings.Contains(d.MailCookies, "=") || len(strings.Split(d.MailCookies, "=")[0]) == 0 {
 				return fmt.Errorf("MailCookies format is invalid, please check your configuration")
 			}
 		}
 
 		// Always validate credentials on Init to ensure settings are correct
 		// This prevents automatic renewal from failing with wrong passwords
+		var err error
 		if len(d.Authorization) == 0 {
 			if d.Username != "" && d.Password != "" {
 				log.Infof("139yun: authorization is empty, performing password login to validate credentials.")
 				// Always use password login for initial setup to ensure credentials are valid
-				newAuth, err := d.loginWithPassword()
+				var newAuth string
+				newAuth, err = d.loginWithPassword()
 				log.Debugf("newAuth: Ok: %s", newAuth)
 				if err != nil {
 					return fmt.Errorf("login with password failed: %w", err)
@@ -69,7 +71,7 @@ func (d *Yun139) Init(ctx context.Context) error {
 		} else {
 			// When authorization exists, refresh it if needed
 			// The refreshToken will use password login as fallback if token refresh fails
-			err := d.refreshToken()
+			err = d.refreshToken()
 			if err != nil {
 				return err
 			}
