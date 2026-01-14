@@ -1321,70 +1321,6 @@ func (d *Yun139) step3_third_party_login(dycpwd string) (string, error) {
 	return newAuthorization, nil
 }
 
-func (d *Yun139) preAuthLogin() (bool, error) {
-	if !strings.Contains(d.MailCookies, "a_l2") {
-		return false, nil // No token, so can't do pre-auth
-	}
-
-	client := resty.New().SetRedirectPolicy(resty.NoRedirectPolicy())
-
-	resp, err := client.R().
-		SetHeader("Cookie", d.MailCookies).
-		Get("https://appmail.mail.10086.cn/")
-
-	if err != nil {
-		// It's not a real error if it's just a redirect being blocked by the policy.
-		// We proceed with the response object to check the status code.
-		if !strings.HasSuffix(err.Error(), "auto redirect is disabled") {
-			return false, fmt.Errorf("pre-auth request failed: %w", err)
-		}
-	}
-
-	if resp.StatusCode() == 302 {
-		location := resp.Header().Get("Location")
-		if strings.HasPrefix(location, "https://appmail.mail.10086.cn/") {
-			log.Infof("139yun: pre-auth redirect, token is invalid.")
-			return false, nil // login is invalid
-		}
-	}
-
-	log.Infof("139yun: pre-auth check successful.")
-
-	// extract sid from cookies
-	var sid string
-	cookies := strings.Split(d.MailCookies, ";")
-	for _, cookie := range cookies {
-		cookie = strings.TrimSpace(cookie)
-		if strings.HasPrefix(cookie, "Os_SSo_Sid=") {
-			sid = strings.TrimPrefix(cookie, "Os_SSo_Sid=")
-			break
-		}
-	}
-
-	if sid == "" {
-		log.Warnf("139yun: Os_SSo_Sid not found in cookies, proceeding with full login.")
-		return false, nil
-	}
-
-	log.Infof("139yun: using existing sid to get token.")
-	token, err := d.step2_get_single_token(sid)
-	if err != nil {
-		log.Warnf("139yun: step2_get_single_token failed with existing sid: %v. proceeding with full login.", err)
-		return false, nil
-	}
-
-	newAuth, err := d.step3_third_party_login(token)
-	if err != nil {
-		log.Warnf("139yun: step3_third_party_login failed after pre-auth: %v. proceeding with full login.", err)
-		return false, nil
-	}
-
-	d.Authorization = newAuth
-	op.MustSaveDriverStorage(d)
-
-	return true, nil
-}
-
 func (d *Yun139) loginWithPassword() (string, error) {
 	if d.Username == "" || d.Password == "" || d.MailCookies == "" {
 		return "", errors.New("username, password or mail_cookies is empty")
@@ -1411,6 +1347,51 @@ func (d *Yun139) loginWithPassword() (string, error) {
 	d.Authorization = newAuth // Ensure Authorization is also updated before saving
 	op.MustSaveDriverStorage(d)
 	return newAuth, nil
+}
+
+// loginWithOptimizedFlow tries to login using an optimized flow:
+// 1. Check if we have necessary parameters for step2 (sid from cookies)
+// 2. Try step2 directly
+// 3. If step2 fails, fall back to full password login (step1 + step2 + step3)
+func (d *Yun139) loginWithOptimizedFlow() (string, error) {
+	if d.Username == "" || d.Password == "" || d.MailCookies == "" {
+		return "", errors.New("username, password or mail_cookies is empty")
+	}
+
+	// Check if we have sid (Os_SSo_Sid) in cookies for step2
+	var sid string
+	cookies := strings.Split(d.MailCookies, ";")
+	for _, cookie := range cookies {
+		cookie = strings.TrimSpace(cookie)
+		if strings.HasPrefix(cookie, "Os_SSo_Sid=") {
+			sid = strings.TrimPrefix(cookie, "Os_SSo_Sid=")
+			break
+		}
+	}
+
+	// If we have sid, try step2 directly
+	if sid != "" {
+		log.Infof("139yun: found existing sid, trying step2 directly.")
+		token, err := d.step2_get_single_token(sid)
+		if err == nil {
+			// Step2 succeeded, proceed to step3
+			newAuth, err := d.step3_third_party_login(token)
+			if err == nil {
+				log.Infof("139yun: optimized flow succeeded (step2 + step3).")
+				d.Authorization = newAuth
+				op.MustSaveDriverStorage(d)
+				return newAuth, nil
+			}
+			log.Warnf("139yun: step3 failed after successful step2: %v. falling back to full login.", err)
+		} else {
+			log.Warnf("139yun: step2 with existing sid failed: %v. falling back to full login.", err)
+		}
+	} else {
+		log.Infof("139yun: no existing sid found, using full login flow.")
+	}
+
+	// Fallback: execute full password login (step1 + step2 + step3)
+	return d.loginWithPassword()
 }
 
 func (d *Yun139) andAlbumRequest(pathname string, body interface{}, resp interface{}) ([]byte, error) {

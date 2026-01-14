@@ -52,23 +52,29 @@ func (d *Yun139) Init(ctx context.Context) error {
 			}
 		}
 
+		// If Authorization is empty, we need to login
 		if len(d.Authorization) == 0 {
 			if d.Username != "" && d.Password != "" {
 				log.Infof("139yun: authorization is empty, trying to login.")
-				loggedIn, err := d.preAuthLogin()
+				newAuth, err := d.loginWithOptimizedFlow()
+				log.Debugf("newAuth: Ok: %s", newAuth)
 				if err != nil {
-					return fmt.Errorf("pre-auth login failed: %w", err)
-				}
-				if !loggedIn {
-					log.Infof("139yun: pre-auth failed, trying to login with password.")
-					newAuth, err := d.loginWithPassword()
-					log.Debugf("newAuth: Ok: %s", newAuth)
-					if err != nil {
-						return fmt.Errorf("login with password failed: %w", err)
-					}
+					return fmt.Errorf("login failed: %w", err)
 				}
 			} else {
 				return fmt.Errorf("authorization is empty and username/password is not provided")
+			}
+		} else {
+			// Authorization exists - this is either a reload or user save
+			// Force password login to validate credentials on user-triggered save
+			// This prevents issues with expired passwords during automatic renewal
+			if d.Username != "" && d.Password != "" && d.MailCookies != "" {
+				log.Infof("139yun: re-initialization with existing auth, forcing password login to validate credentials.")
+				newAuth, err := d.loginWithPassword()
+				log.Debugf("newAuth: Ok: %s", newAuth)
+				if err != nil {
+					return fmt.Errorf("login with password failed: %w", err)
+				}
 			}
 		}
 		err := d.refreshToken()
