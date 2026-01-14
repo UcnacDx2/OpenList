@@ -1327,8 +1327,12 @@ func (d *Yun139) preAuthLogin() (bool, error) {
 		SetHeader("Cookie", d.MailCookies).
 		Get("https://appmail.mail.10086.cn/")
 
-	if err != nil && resp == nil {
-		return false, fmt.Errorf("pre-auth request failed: %w", err)
+	if err != nil {
+		// It's not a real error if it's just a redirect being blocked by the policy.
+		// We proceed with the response object to check the status code.
+		if !strings.HasSuffix(err.Error(), "auto redirect is disabled") {
+			return false, fmt.Errorf("pre-auth request failed: %w", err)
+		}
 	}
 
 	if resp.StatusCode() == 302 {
