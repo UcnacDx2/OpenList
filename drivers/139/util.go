@@ -1382,8 +1382,9 @@ func (d *Yun139) preAuthLogin() (bool, error) {
 		}
 	}
 
-	log.Infof("139yun: pre-auth check successful, but no sid found.")
-	// Even if pre-auth check passed, without sid we can't continue
+	log.Infof("139yun: pre-auth validation successful, but no Os_SSo_Sid found in cookies.")
+	// Even if a_l2 validation passed, without sid we cannot proceed with step2
+	// Return false to trigger full password login flow
 	return false, nil
 }
 

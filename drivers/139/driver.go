@@ -72,13 +72,13 @@ func (d *Yun139) Init(ctx context.Context) error {
 				}
 			} else {
 				// Authorization exists - this is likely a manual settings update
-				// Validate password to provide immediate feedback
-				log.Infof("139yun: validating credentials for settings update.")
+				// Perform full login to validate password AND refresh authorization with latest credentials
+				log.Infof("139yun: validating credentials and refreshing authorization for settings update.")
 				_, err := d.loginWithPassword()
 				if err != nil {
 					return fmt.Errorf("password validation failed: %w", err)
 				}
-				log.Infof("139yun: password validation successful.")
+				log.Infof("139yun: password validation successful, authorization refreshed.")
 			}
 		} else if len(d.Authorization) == 0 {
 			return fmt.Errorf("authorization is empty and username/password is not provided")
