@@ -756,6 +756,10 @@ func getMd5(dataStr string) string {
 	return fmt.Sprintf("%x", hash)
 }
 
+// sanitizeLoginCookies filters and orders cookies based on a predefined allowlist.
+// This is necessary because the login endpoint requires a specific cookie order and
+// rejects unknown cookies. The function ensures that only necessary cookies are sent,
+// preventing potential login failures due to cookie changes by the service.
 func sanitizeLoginCookies(existingCookies string, newJSessionID string) string {
 	orderedCookieNames := []string{
 		"behaviorid",
@@ -826,7 +830,6 @@ func (d *Yun139) step1_password_login() (string, error) {
 	for _, cookie := range getResp.Cookies() {
 		if cookie.Name == "JSESSIONID" {
 			jsessionid = cookie.Value
-			log.Debugf("DEBUG: 提取到新的 JSESSIONID: %s", jsessionid)
 			break
 		}
 	}
@@ -843,7 +846,6 @@ func (d *Yun139) step1_password_login() (string, error) {
 	cguid := strconv.FormatInt(time.Now().UnixMilli(), 10) // 随机生成 cguid
 
 	sanitizedCookie := sanitizeLoginCookies(d.MailCookies, jsessionid)
-	log.Debugf("DEBUG: Sanitized Cookies: %s", sanitizedCookie)
 
 	loginHeaders := map[string]string{
 		"accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
@@ -903,7 +905,7 @@ func (d *Yun139) step1_password_login() (string, error) {
 
 	var sid, extractedCguid string
 
-	// 从 Location 头部提取 sid 和 cguid, and handle risk control
+	// 从 Location 头部提取 sid 和 cguid, 并处理风险控制
 	locationHeader := res.Header().Get("Location")
 	if locationHeader != "" {
 		if ecMatch := regexp.MustCompile(`ec=([^&]+)`).FindStringSubmatch(locationHeader); len(ecMatch) > 1 {
@@ -917,7 +919,7 @@ func (d *Yun139) step1_password_login() (string, error) {
 			sid = sidMatch[1]
 			log.Debugf("DEBUG: 从 Location 提取到 sid: %s", sid)
 		} else if strings.Contains(locationHeader, "default.html") {
-			return "", errors.New("risk control triggered: sid is missing in default.html redirect")
+			return "", errors.New("authentication failed: sid is missing in default.html redirect")
 		}
 
 		if len(cguidMatch) > 1 {
@@ -1315,19 +1317,29 @@ func (d *Yun139) preAuthLogin() (bool, error) {
 		return false, nil // No token, so can't do pre-auth
 	}
 
-	client := base.RestyClient.SetRedirectPolicy(resty.NoRedirectPolicy())
-	defer base.RestyClient.SetRedirectPolicy(resty.FlexibleRedirectPolicy(10))
+	client := resty.New().SetRedirectPolicy(resty.NoRedirectPolicy())
 
 	resp, err := client.R().
 		SetHeader("Cookie", d.MailCookies).
 		Get("https://appmail.mail.10086.cn/")
 
 	if err != nil {
-		// It's not a real error if it's just a redirect being blocked by the policy.
-		// We proceed with the response object to check the status code.
-		if !strings.HasSuffix(err.Error(), "auto redirect is disabled") {
+		// We expect an error here because we disabled redirects.
+		// A nil error means the redirect did not happen as expected.
+		// We also check if the error is a URL error, which is expected.
+		urlErr, isUrlErr := err.(*url.Error)
+		if !isUrlErr {
+			return false, fmt.Errorf("pre-auth request failed with an unexpected error type: %w", err)
+		}
+		// Further check if the underlying error is about the redirect policy.
+		// This makes the check less string-dependent.
+		if !strings.Contains(urlErr.Error(), "stopped after 1 redirects") {
 			return false, fmt.Errorf("pre-auth request failed: %w", err)
 		}
+	}
+
+	if resp == nil {
+		return false, errors.New("pre-auth response is nil after a redirect attempt")
 	}
 
 	if resp.StatusCode() == 302 {
@@ -1365,7 +1377,8 @@ func (d *Yun139) preAuthLogin() (bool, error) {
 
 	newAuth, err := d.step3_third_party_login(token)
 	if err != nil {
-		return false, fmt.Errorf("step3_third_party_login failed: %w", err)
+		log.Warnf("139yun: step3_third_party_login failed after pre-auth: %v. proceeding with full login.", err)
+		return false, nil
 	}
 
 	d.Authorization = newAuth

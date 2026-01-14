@@ -43,9 +43,15 @@ func (d *Yun139) GetAddition() driver.Additional {
 
 func (d *Yun139) Init(ctx context.Context) error {
 	if d.ref == nil {
-		if d.MailCookies != "" && !strings.Contains(d.MailCookies, "=") {
-			return fmt.Errorf("MailCookies format is invalid, please check your configuration")
+		// More robust validation for MailCookies
+		trimmedCookies := strings.TrimSpace(d.MailCookies)
+		if trimmedCookies != "" {
+			d.MailCookies = trimmedCookies // Update with trimmed value
+			if !strings.Contains(d.MailCookies, "=") || len(strings.Split(d.MailCookies, "=")[0]) == 0 {
+				return fmt.Errorf("MailCookies format is invalid, please check your configuration")
+			}
 		}
+
 		if len(d.Authorization) == 0 {
 			if d.Username != "" && d.Password != "" {
 				log.Infof("139yun: authorization is empty, trying to login.")
