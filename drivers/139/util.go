@@ -883,24 +883,21 @@ func (d *Yun139) step1_password_login() (string, error) {
 	log.Debugf("DEBUG: 登录请求 Body: %s", loginData.Encode())
 
 	// 设置客户端不跟随重定向
-	client := base.RestyClient.SetRedirectPolicy(resty.NoRedirectPolicy())
+	// Create a new client to avoid race conditions on the global client's redirect policy.
+	client := resty.New().SetRedirectPolicy(resty.NoRedirectPolicy())
 	res, err := client.R().
 		SetHeaders(loginHeaders).
 		SetFormDataFromValues(loginData).
 		Post(loginURL)
 
-	if err != nil {
-		// 如果是重定向错误，则不作为失败处理，因为我们禁止了自动重定向
-		if res != nil && res.StatusCode() >= 300 && res.StatusCode() < 400 {
-			log.Debugf("DEBUG: 登录响应 Status Code: %d (Redirect)", res.StatusCode())
-		} else {
-			return "", fmt.Errorf("step1 login request failed: %w", err)
-		}
-	} else {
-		log.Debugf("DEBUG: 登录响应 Status Code: %d", res.StatusCode())
+	// When NoRedirectPolicy is used, resty returns an error on redirect, but the response should still be available.
+	if err != nil && !strings.Contains(err.Error(), "auto redirect is disabled") {
+		return "", fmt.Errorf("step1 login request failed: %w", err)
 	}
-	// 恢复客户端的默认重定向策略，以免影响后续请求
-	base.RestyClient.SetRedirectPolicy(resty.FlexibleRedirectPolicy(10))
+	if res == nil {
+		return "", fmt.Errorf("step1 login request failed: response is nil (error: %v)", err)
+	}
+	log.Debugf("DEBUG: 登录响应 Status Code: %d", res.StatusCode())
 	log.Debugf("DEBUG: 登录响应 Headers: %+v", res.Header())
 
 	var sid, extractedCguid string
@@ -1324,22 +1321,11 @@ func (d *Yun139) preAuthLogin() (bool, error) {
 		Get("https://appmail.mail.10086.cn/")
 
 	if err != nil {
-		// We expect an error here because we disabled redirects.
-		// A nil error means the redirect did not happen as expected.
-		// We also check if the error is a URL error, which is expected.
-		urlErr, isUrlErr := err.(*url.Error)
-		if !isUrlErr {
-			return false, fmt.Errorf("pre-auth request failed with an unexpected error type: %w", err)
-		}
-		// Further check if the underlying error is about the redirect policy.
-		// This makes the check less string-dependent.
-		if !strings.Contains(urlErr.Error(), "stopped after 1 redirects") {
+		// It's not a real error if it's just a redirect being blocked by the policy.
+		// We proceed with the response object to check the status code.
+		if !strings.HasSuffix(err.Error(), "auto redirect is disabled") {
 			return false, fmt.Errorf("pre-auth request failed: %w", err)
 		}
-	}
-
-	if resp == nil {
-		return false, errors.New("pre-auth response is nil after a redirect attempt")
 	}
 
 	if resp.StatusCode() == 302 {
