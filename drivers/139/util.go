@@ -1336,7 +1336,7 @@ func (d *Yun139) preAuthLogin() (bool, error) {
 	}
 
 	if sid == "" {
-		log.Debugf("139yun: Os_SSo_Sid not found in cookies, cannot use pre-auth.")
+		log.Warnf("139yun: Os_SSo_Sid not found in cookies, cannot use pre-auth.")
 		return false, nil
 	}
 
