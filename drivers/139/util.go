@@ -1322,22 +1322,25 @@ func (d *Yun139) step3_third_party_login(dycpwd string) (string, error) {
 }
 
 // preAuthLogin attempts to login using existing cookies without making a request to appmail.mail.10086.cn
-// It checks if step2 parameters (Os_SSo_Sid) exist and tries step2 first
+// It checks if step2 required parameters (Os_SSo_Sid and RMKEY) exist and tries step2 first
 // Returns true if pre-auth succeeds, false if it fails (caller should proceed with full password login)
 func (d *Yun139) preAuthLogin() (bool, error) {
-	// Extract sid from cookies directly - no need to check appmail.mail.10086.cn first
+	// Extract sid and check for RMKEY from cookies - both are required for step2
 	var sid string
+	hasRMKEY := false
 	cookies := strings.Split(d.MailCookies, ";")
 	for _, cookie := range cookies {
 		cookie = strings.TrimSpace(cookie)
 		if strings.HasPrefix(cookie, "Os_SSo_Sid=") {
 			sid = strings.TrimSpace(strings.TrimPrefix(cookie, "Os_SSo_Sid="))
-			break
+		}
+		if strings.HasPrefix(cookie, "RMKEY=") {
+			hasRMKEY = true
 		}
 	}
 
-	if sid == "" {
-		log.Warnf("139yun: Os_SSo_Sid not found in cookies, cannot use pre-auth.")
+	if sid == "" || !hasRMKEY {
+		log.Warnf("139yun: Os_SSo_Sid or RMKEY not found in cookies, cannot use pre-auth.")
 		return false, nil
 	}
 

@@ -58,7 +58,7 @@ func (d *Yun139) Init(ctx context.Context) error {
 		if len(d.Authorization) == 0 {
 			if d.Username != "" && d.Password != "" {
 				log.Infof("139yun: authorization is empty, performing password login to validate credentials.")
-				// Password login validates credentials and updates d.Authorization internally, then saves it
+				// Password login validates credentials, updates d.Authorization, and saves via op.MustSaveDriverStorage()
 				_, err = d.loginWithPassword()
 				if err != nil {
 					return fmt.Errorf("login with password failed: %w", err)
