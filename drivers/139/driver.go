@@ -43,6 +43,17 @@ func (d *Yun139) GetAddition() driver.Additional {
 
 func (d *Yun139) Init(ctx context.Context) error {
 	if d.ref == nil {
+		// Validate that if any of the three fields (Username, Password, MailCookies) is provided, all must be provided
+		hasUsername := strings.TrimSpace(d.Username) != ""
+		hasPassword := strings.TrimSpace(d.Password) != ""
+		hasMailCookies := strings.TrimSpace(d.MailCookies) != ""
+		
+		if hasUsername || hasPassword || hasMailCookies {
+			if !hasUsername || !hasPassword || !hasMailCookies {
+				return fmt.Errorf("if any of Username, Password, or MailCookies is provided, all three must be provided")
+			}
+		}
+
 		// More robust validation for MailCookies
 		trimmedCookies := strings.TrimSpace(d.MailCookies)
 		if trimmedCookies != "" {
@@ -52,25 +63,49 @@ func (d *Yun139) Init(ctx context.Context) error {
 			}
 		}
 
+		// When all three fields (Username, Password, MailCookies) are present, always use password login for validation
+		// This ensures users get immediate feedback when saving settings changes
+		allThreePresent := hasUsername && hasPassword && hasMailCookies
+		
 		if len(d.Authorization) == 0 {
 			if d.Username != "" && d.Password != "" {
 				log.Infof("139yun: authorization is empty, trying to login.")
-				loggedIn, err := d.preAuthLogin()
-				if err != nil {
-					return fmt.Errorf("pre-auth login failed: %w", err)
-				}
-				if !loggedIn {
-					log.Infof("139yun: pre-auth failed, trying to login with password.")
+				// When all three fields are present, skip pre-auth and go straight to password login
+				if allThreePresent {
+					log.Infof("139yun: all three fields present, using password login for validation.")
 					newAuth, err := d.loginWithPassword()
 					log.Debugf("newAuth: Ok: %s", newAuth)
 					if err != nil {
 						return fmt.Errorf("login with password failed: %w", err)
 					}
+				} else {
+					loggedIn, err := d.preAuthLogin()
+					if err != nil {
+						return fmt.Errorf("pre-auth login failed: %w", err)
+					}
+					if !loggedIn {
+						log.Infof("139yun: pre-auth failed, trying to login with password.")
+						newAuth, err := d.loginWithPassword()
+						log.Debugf("newAuth: Ok: %s", newAuth)
+						if err != nil {
+							return fmt.Errorf("login with password failed: %w", err)
+						}
+					}
 				}
 			} else {
 				return fmt.Errorf("authorization is empty and username/password is not provided")
 			}
+		} else if allThreePresent {
+			// Even if Authorization exists, when all three fields are present, validate with password login
+			// This ensures settings changes are validated immediately
+			log.Infof("139yun: all three fields present, validating credentials with password login.")
+			newAuth, err := d.loginWithPassword()
+			log.Debugf("newAuth: Ok: %s", newAuth)
+			if err != nil {
+				return fmt.Errorf("login with password failed: %w", err)
+			}
 		}
+		
 		err := d.refreshToken()
 		if err != nil {
 			return err
