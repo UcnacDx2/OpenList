@@ -170,7 +170,22 @@ func (d *Yun139) request(url string, method string, callback base.ReqCallback, r
 		return nil, err
 	}
 	log.Debugf("[139] response body: %s", res.String())
-	if !e.Success {
+	if e.Code == "S00012" {
+		log.Infof("139yun: token expired, trying to refresh.")
+		err = d.refreshToken()
+		if err != nil {
+			return nil, err
+		}
+		// Retry the request
+		req.SetResult(&e)
+		res, err = req.Execute(method, url)
+		if err != nil {
+			return nil, err
+		}
+		if !e.Success {
+			return nil, errors.New(e.Message)
+		}
+	} else if !e.Success {
 		if resp != nil {
 			// Attempt to unmarshal to see if it contains the special success code.
 			if err := utils.Json.Unmarshal(res.Body(), resp); err == nil {
@@ -539,7 +554,22 @@ func (d *Yun139) personalRequest(pathname string, method string, callback base.R
 		return nil, err
 	}
 	log.Debugf("[139] personal response body: %s", res.String())
-	if !e.Success {
+	if e.Code == "S00012" {
+		log.Infof("139yun: token expired, trying to refresh.")
+		err = d.refreshToken()
+		if err != nil {
+			return nil, err
+		}
+		// Retry the request
+		req.SetResult(&e)
+		res, err = req.Execute(method, url)
+		if err != nil {
+			return nil, err
+		}
+		if !e.Success {
+			return nil, errors.New(e.Message)
+		}
+	} else if !e.Success {
 		return nil, errors.New(e.Message)
 	}
 	if resp != nil {

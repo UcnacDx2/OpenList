@@ -43,6 +43,15 @@ func (d *Yun139) GetAddition() driver.Additional {
 
 func (d *Yun139) Init(ctx context.Context) error {
 	if d.ref == nil {
+		// Enforce "all or nothing" for credentials
+		hasMailCookies := d.MailCookies != ""
+		hasUsername := d.Username != ""
+		hasPassword := d.Password != ""
+
+		if (hasMailCookies || hasUsername || hasPassword) && !(hasMailCookies && hasUsername && hasPassword) {
+			return fmt.Errorf("MailCookies, Username, and Password must all be provided together")
+		}
+
 		// More robust validation for MailCookies
 		trimmedCookies := strings.TrimSpace(d.MailCookies)
 		if trimmedCookies != "" {
@@ -52,33 +61,30 @@ func (d *Yun139) Init(ctx context.Context) error {
 			}
 		}
 
-		if len(d.Authorization) == 0 {
-			if d.Username != "" && d.Password != "" {
-				log.Infof("139yun: authorization is empty, trying to login.")
-				loggedIn, err := d.preAuthLogin()
-				if err != nil {
-					return fmt.Errorf("pre-auth login failed: %w", err)
-				}
-				if !loggedIn {
-					log.Infof("139yun: pre-auth failed, trying to login with password.")
-					newAuth, err := d.loginWithPassword()
-					log.Debugf("newAuth: Ok: %s", newAuth)
-					if err != nil {
-						return fmt.Errorf("login with password failed: %w", err)
-					}
-				}
-			} else {
-				return fmt.Errorf("authorization is empty and username/password is not provided")
+		hasAllCredentials := d.MailCookies != "" && d.Username != "" && d.Password != ""
+		// If all credentials are provided, always perform a password login to validate them.
+		// Otherwise, only log in if the authorization token is missing.
+		if hasAllCredentials {
+			log.Infof("139yun: All credentials provided, forcing login to validate.")
+			loggedIn, err := d.preAuthLogin()
+			if err != nil {
+				return fmt.Errorf("pre-auth login failed: %w", err)
 			}
-		}
-		err := d.refreshToken()
-		if err != nil {
-			return err
+			if !loggedIn {
+				log.Infof("139yun: pre-auth failed, trying to login with password.")
+				_, err := d.loginWithPassword()
+				if err != nil {
+					return fmt.Errorf("login with password failed: %w", err)
+				}
+			}
+		} else if len(d.Authorization) == 0 {
+			// Because of the "all or nothing" check, if we are here, it means none of the credentials were provided.
+			return fmt.Errorf("authorization is empty and credentials (MailCookies, Username, Password) are not provided")
 		}
 
 		// Query Route Policy
 		var resp QueryRoutePolicyResp
-		_, err = d.requestRoute(base.Json{
+		_, err := d.requestRoute(base.Json{
 			"userInfo": base.Json{
 				"userType":    1,
 				"accountType": 1,
