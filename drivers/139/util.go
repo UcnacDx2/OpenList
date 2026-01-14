@@ -756,6 +756,10 @@ func getMd5(dataStr string) string {
 	return fmt.Sprintf("%x", hash)
 }
 
+// sanitizeLoginCookies filters and orders cookies based on a predefined allowlist.
+// This is necessary because the login endpoint requires a specific cookie order and
+// rejects unknown cookies. The function ensures that only necessary cookies are sent,
+// preventing potential login failures due to cookie changes by the service.
 func sanitizeLoginCookies(existingCookies string, newJSessionID string) string {
 	orderedCookieNames := []string{
 		"behaviorid",
@@ -826,7 +830,6 @@ func (d *Yun139) step1_password_login() (string, error) {
 	for _, cookie := range getResp.Cookies() {
 		if cookie.Name == "JSESSIONID" {
 			jsessionid = cookie.Value
-			log.Debugf("DEBUG: 提取到新的 JSESSIONID: %s", jsessionid)
 			break
 		}
 	}
@@ -843,7 +846,6 @@ func (d *Yun139) step1_password_login() (string, error) {
 	cguid := strconv.FormatInt(time.Now().UnixMilli(), 10) // 随机生成 cguid
 
 	sanitizedCookie := sanitizeLoginCookies(d.MailCookies, jsessionid)
-	log.Debugf("DEBUG: Sanitized Cookies: %s", sanitizedCookie)
 
 	loginHeaders := map[string]string{
 		"accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
@@ -881,29 +883,26 @@ func (d *Yun139) step1_password_login() (string, error) {
 	log.Debugf("DEBUG: 登录请求 Body: %s", loginData.Encode())
 
 	// 设置客户端不跟随重定向
-	client := base.RestyClient.SetRedirectPolicy(resty.NoRedirectPolicy())
+	// Create a new client to avoid race conditions on the global client's redirect policy.
+	client := resty.New().SetRedirectPolicy(resty.NoRedirectPolicy())
 	res, err := client.R().
 		SetHeaders(loginHeaders).
 		SetFormDataFromValues(loginData).
 		Post(loginURL)
 
-	if err != nil {
-		// 如果是重定向错误，则不作为失败处理，因为我们禁止了自动重定向
-		if res != nil && res.StatusCode() >= 300 && res.StatusCode() < 400 {
-			log.Debugf("DEBUG: 登录响应 Status Code: %d (Redirect)", res.StatusCode())
-		} else {
-			return "", fmt.Errorf("step1 login request failed: %w", err)
-		}
-	} else {
-		log.Debugf("DEBUG: 登录响应 Status Code: %d", res.StatusCode())
+	// When NoRedirectPolicy is used, resty returns an error on redirect, but the response should still be available.
+	if err != nil && !strings.Contains(err.Error(), "auto redirect is disabled") {
+		return "", fmt.Errorf("step1 login request failed: %w", err)
 	}
-	// 恢复客户端的默认重定向策略，以免影响后续请求
-	base.RestyClient.SetRedirectPolicy(resty.FlexibleRedirectPolicy(10))
+	if res == nil {
+		return "", fmt.Errorf("step1 login request failed: response is nil (error: %v)", err)
+	}
+	log.Debugf("DEBUG: 登录响应 Status Code: %d", res.StatusCode())
 	log.Debugf("DEBUG: 登录响应 Headers: %+v", res.Header())
 
 	var sid, extractedCguid string
 
-	// 从 Location 头部提取 sid 和 cguid, and handle risk control
+	// 从 Location 头部提取 sid 和 cguid, 并处理风险控制
 	locationHeader := res.Header().Get("Location")
 	if locationHeader != "" {
 		if ecMatch := regexp.MustCompile(`ec=([^&]+)`).FindStringSubmatch(locationHeader); len(ecMatch) > 1 {
@@ -917,7 +916,7 @@ func (d *Yun139) step1_password_login() (string, error) {
 			sid = sidMatch[1]
 			log.Debugf("DEBUG: 从 Location 提取到 sid: %s", sid)
 		} else if strings.Contains(locationHeader, "default.html") {
-			return "", errors.New("risk control triggered: sid is missing in default.html redirect")
+			return "", errors.New("authentication failed: sid is missing in default.html redirect")
 		}
 
 		if len(cguidMatch) > 1 {
@@ -947,16 +946,28 @@ func (d *Yun139) step1_password_login() (string, error) {
 		return "", errors.New("failed to extract sid or cguid from login response")
 	}
 
-	// 提取并记录 cookies
-	loginUrlObj, _ := url.Parse(loginURL)
-	cookies := base.RestyClient.GetClient().Jar.Cookies(loginUrlObj)
-	var cookieStrings []string
+	// Update cookies from response, merging new ones with existing ones.
+	existingCookiesMap := make(map[string]string)
+	// 1. Populate map with existing cookies from the driver.
+	cookies := strings.Split(d.MailCookies, ";")
 	for _, cookie := range cookies {
-		cookieStrings = append(cookieStrings, cookie.Name+"="+cookie.Value)
+		cookie = strings.TrimSpace(cookie)
+		parts := strings.SplitN(cookie, "=", 2)
+		if len(parts) == 2 {
+			existingCookiesMap[parts[0]] = parts[1]
+		}
 	}
-	cookieStr := strings.Join(cookieStrings, "; ")
-	log.Debugf("DEBUG: 提取到的 Cookies: %s", cookieStr)
-	d.MailCookies = cookieStr
+	// 2. Update map with new cookies from the Set-Cookie headers in the response.
+	for _, cookie := range res.Cookies() {
+		existingCookiesMap[cookie.Name] = cookie.Value
+	}
+	// 3. Rebuild the cookie string. The order doesn't matter here, as sanitizeLoginCookies will reorder it later if needed.
+	var finalCookieParts []string
+	for name, value := range existingCookiesMap {
+		finalCookieParts = append(finalCookieParts, name+"="+value)
+	}
+	d.MailCookies = strings.Join(finalCookieParts, "; ")
+	log.Debugf("DEBUG: 更新后的 Cookies: %s", d.MailCookies)
 
 	return sid, nil
 }
@@ -1315,8 +1326,7 @@ func (d *Yun139) preAuthLogin() (bool, error) {
 		return false, nil // No token, so can't do pre-auth
 	}
 
-	client := base.RestyClient.SetRedirectPolicy(resty.NoRedirectPolicy())
-	defer base.RestyClient.SetRedirectPolicy(resty.FlexibleRedirectPolicy(10))
+	client := resty.New().SetRedirectPolicy(resty.NoRedirectPolicy())
 
 	resp, err := client.R().
 		SetHeader("Cookie", d.MailCookies).
@@ -1365,7 +1375,8 @@ func (d *Yun139) preAuthLogin() (bool, error) {
 
 	newAuth, err := d.step3_third_party_login(token)
 	if err != nil {
-		return false, fmt.Errorf("step3_third_party_login failed: %w", err)
+		log.Warnf("139yun: step3_third_party_login failed after pre-auth: %v. proceeding with full login.", err)
+		return false, nil
 	}
 
 	d.Authorization = newAuth
