@@ -1353,6 +1353,13 @@ func (d *Yun139) loginWithPassword() (string, error) {
 // 1. Check if we have necessary parameters for step2 (sid from cookies)
 // 2. Try step2 directly
 // 3. If step2 fails, fall back to full password login (step1 + step2 + step3)
+//
+// Flow explanation:
+// - sid (session ID) is obtained from the Os_SSo_Sid cookie from mail.139.com
+// - step2 uses sid to get a single-use token (artifact/dycpwd)
+// - step3 uses the token to perform third-party login and get Authorization
+// - If we have sid, we can skip step1 (password login) and go directly to step2
+//
 // Note: This function calls loginWithPassword() as a fallback, but there's no recursion risk
 // since loginWithPassword() is a straight-through function that doesn't call back to this.
 func (d *Yun139) loginWithOptimizedFlow() (string, error) {
