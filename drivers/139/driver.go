@@ -52,7 +52,16 @@ func (d *Yun139) Init(ctx context.Context) error {
 			}
 		}
 
-		if len(d.Authorization) == 0 {
+		// if account/password/cookies are all provided, always try to login with password first
+		// to give user feedback if they are correct
+		if d.Username != "" && d.Password != "" && d.MailCookies != "" {
+			log.Infof("139yun: all credentials provided, trying to login with password.")
+			_, err := d.loginWithPassword()
+			if err != nil {
+				log.Errorf("login with password failed: %v", err)
+				return fmt.Errorf("login with password failed: %w", err)
+			}
+		} else if len(d.Authorization) == 0 {
 			if d.Username != "" && d.Password != "" {
 				log.Infof("139yun: authorization is empty, trying to login.")
 				loggedIn, err := d.preAuthLogin()
@@ -61,8 +70,7 @@ func (d *Yun139) Init(ctx context.Context) error {
 				}
 				if !loggedIn {
 					log.Infof("139yun: pre-auth failed, trying to login with password.")
-					newAuth, err := d.loginWithPassword()
-					log.Debugf("newAuth: Ok: %s", newAuth)
+					_, err := d.loginWithPassword()
 					if err != nil {
 						return fmt.Errorf("login with password failed: %w", err)
 					}
