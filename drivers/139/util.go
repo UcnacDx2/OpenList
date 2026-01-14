@@ -38,6 +38,15 @@ const (
 	KEY_HEX_2 = "7150714477323633586746674c337538"                 // 第二层 AES 解密密钥
 )
 
+var (
+	// Pre-compiled regex patterns for performance
+	jsessionIDRegex = regexp.MustCompile(`JSESSIONID=([^;]+)`)
+	jsessionIDReplaceRegex = regexp.MustCompile(`JSESSIONID=[^;]*`)
+	sidRegex = regexp.MustCompile(`sid=([^&]+)`)
+	cguidRegex = regexp.MustCompile(`cguid=([^&]+)`)
+	ecRegex = regexp.MustCompile(`ec=([^&]+)`)
+)
+
 // do others that not defined in Driver interface
 func (d *Yun139) isFamily() bool {
 	return d.Type == "family"
@@ -839,13 +848,11 @@ func (d *Yun139) step1_password_login() (string, error) {
 		// Extract and update JSESSIONID if present
 		setCookieHeaders := getRes.Header().Values("Set-Cookie")
 		for _, cookieStr := range setCookieHeaders {
-			if strings.Contains(cookieStr, "JSESSIONID=") {
-				jsessionMatch := regexp.MustCompile(`JSESSIONID=([^;]+)`).FindStringSubmatch(cookieStr)
-				if len(jsessionMatch) > 1 {
-					// Update sanitized cookies with fresh JSESSIONID
-					sanitizedCookies = regexp.MustCompile(`JSESSIONID=[^;]*`).ReplaceAllString(sanitizedCookies, "JSESSIONID="+jsessionMatch[1])
-					log.Debugf("DEBUG: Updated JSESSIONID: %s", jsessionMatch[1])
-				}
+			jsessionMatch := jsessionIDRegex.FindStringSubmatch(cookieStr)
+			if len(jsessionMatch) > 1 {
+				// Update sanitized cookies with fresh JSESSIONID
+				sanitizedCookies = jsessionIDReplaceRegex.ReplaceAllString(sanitizedCookies, "JSESSIONID="+jsessionMatch[1])
+				log.Debugf("DEBUG: Updated JSESSIONID: %s", jsessionMatch[1])
 			}
 		}
 	}
@@ -919,9 +926,9 @@ func (d *Yun139) step1_password_login() (string, error) {
 	if locationHeader != "" {
 		log.Debugf("DEBUG: Location header: %s", locationHeader)
 		
-		sidMatch := regexp.MustCompile(`sid=([^&]+)`).FindStringSubmatch(locationHeader)
-		cguidMatch := regexp.MustCompile(`cguid=([^&]+)`).FindStringSubmatch(locationHeader)
-		ecMatch := regexp.MustCompile(`ec=([^&]+)`).FindStringSubmatch(locationHeader)
+		sidMatch := sidRegex.FindStringSubmatch(locationHeader)
+		cguidMatch := cguidRegex.FindStringSubmatch(locationHeader)
+		ecMatch := ecRegex.FindStringSubmatch(locationHeader)
 		
 		if len(sidMatch) > 1 {
 			sid = sidMatch[1]
@@ -1351,18 +1358,17 @@ func (d *Yun139) checkTokenValidity() bool {
 	}
 
 	// Test token validity by accessing the mail portal
+	// Create a new client to avoid race conditions with global redirect policy
 	testURL := "https://appmail.mail.10086.cn/"
-	client := base.RestyClient.SetRedirectPolicy(resty.NoRedirectPolicy())
+	client := resty.New()
+	client.SetRedirectPolicy(resty.NoRedirectPolicy())
 	res, err := client.R().
 		SetHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36").
 		Get(testURL)
 
-	// Restore default redirect policy
-	base.RestyClient.SetRedirectPolicy(resty.FlexibleRedirectPolicy(10))
-
-	// Check if response is valid
-	if res == nil {
-		log.Debugf("139yun: token validity check failed, no response received")
+	// Handle errors
+	if err != nil {
+		log.Debugf("139yun: token validity check failed with error: %v", err)
 		return false
 	}
 
@@ -1370,14 +1376,14 @@ func (d *Yun139) checkTokenValidity() bool {
 	if res.StatusCode() >= 300 && res.StatusCode() < 400 {
 		location := res.Header().Get("Location")
 		log.Debugf("139yun: got redirect response (status: %d) to: %s", res.StatusCode(), location)
-		// If redirected to login page, token is invalid
-		// If not redirected or location is empty, token may still be valid
-		if location != "" && location != testURL {
+		// If redirected to a login page or different URL, token is invalid
+		// Common login redirect patterns: /default.html, /login, etc.
+		if location != "" && (strings.Contains(location, "default.html") || strings.Contains(location, "login") || strings.Contains(location, "Login")) {
 			log.Debugf("139yun: token validity check failed, redirected to login page")
 			return false
 		}
-		// No redirect or same URL means token is valid
-		log.Debugf("139yun: token validity check passed (no redirect)")
+		// No clear login redirect means token might be valid
+		log.Debugf("139yun: token validity check passed (redirect to non-login page)")
 		return true
 	} else if res.StatusCode() == 200 {
 		// Success response means token is valid
