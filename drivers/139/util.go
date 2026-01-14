@@ -946,16 +946,28 @@ func (d *Yun139) step1_password_login() (string, error) {
 		return "", errors.New("failed to extract sid or cguid from login response")
 	}
 
-	// 提取并记录 cookies
-	loginUrlObj, _ := url.Parse(loginURL)
-	cookies := base.RestyClient.GetClient().Jar.Cookies(loginUrlObj)
-	var cookieStrings []string
+	// Update cookies from response, merging new ones with existing ones.
+	existingCookiesMap := make(map[string]string)
+	// 1. Populate map with existing cookies from the driver.
+	cookies := strings.Split(d.MailCookies, ";")
 	for _, cookie := range cookies {
-		cookieStrings = append(cookieStrings, cookie.Name+"="+cookie.Value)
+		cookie = strings.TrimSpace(cookie)
+		parts := strings.SplitN(cookie, "=", 2)
+		if len(parts) == 2 {
+			existingCookiesMap[parts[0]] = parts[1]
+		}
 	}
-	cookieStr := strings.Join(cookieStrings, "; ")
-	log.Debugf("DEBUG: 提取到的 Cookies: %s", cookieStr)
-	d.MailCookies = cookieStr
+	// 2. Update map with new cookies from the Set-Cookie headers in the response.
+	for _, cookie := range res.Cookies() {
+		existingCookiesMap[cookie.Name] = cookie.Value
+	}
+	// 3. Rebuild the cookie string. The order doesn't matter here, as sanitizeLoginCookies will reorder it later if needed.
+	var finalCookieParts []string
+	for name, value := range existingCookiesMap {
+		finalCookieParts = append(finalCookieParts, name+"="+value)
+	}
+	d.MailCookies = strings.Join(finalCookieParts, "; ")
+	log.Debugf("DEBUG: 更新后的 Cookies: %s", d.MailCookies)
 
 	return sid, nil
 }
