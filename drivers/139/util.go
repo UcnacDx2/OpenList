@@ -761,9 +761,80 @@ func getMd5(dataStr string) string {
 	return fmt.Sprintf("%x", hash)
 }
 
+func sanitizeLoginCookies(existingCookies string, newJSessionID string) string {
+	allowedCookieNames := map[string]bool{
+		"behaviorid":             true,
+		"Os_SSo_Sid":             true,
+		"_139_index_isLoginType": true,
+		"_139_login_version":     true,
+		"Login_UserNumber":       true,
+		"cookiepartid8011":       true,
+		"_139_login_agreement":   true,
+		"UserData":               true,
+		"rmUin8011":              true,
+		"cookiepartid":           true,
+		"UUIDToken":              true,
+		"SkinPath28011":          true,
+		"cbauto":                 true,
+		"areaCode8011":           true,
+		"cookieLen":              true,
+		"DEVICE_INFO_DIGEST":     true,
+		"loginProcessFlag":       true,
+		"provCode8011":           true,
+		"S_DEVICE_TOKEN":         true,
+		"taskIdCloud":            true,
+		"UserNowState":           true,
+		"UserNowState8011":       true,
+		"ut8011":                 true,
+	}
+
+	finalCookies := make(map[string]string)
+
+	cookies := strings.Split(existingCookies, ";")
+	for _, cookie := range cookies {
+		cookie = strings.TrimSpace(cookie)
+		parts := strings.SplitN(cookie, "=", 2)
+		if len(parts) == 2 {
+			name := parts[0]
+			value := parts[1]
+			if allowedCookieNames[name] {
+				finalCookies[name] = value
+			}
+		}
+	}
+
+	if newJSessionID != "" {
+		finalCookies["JSESSIONID"] = newJSessionID
+	}
+
+	var cookieParts []string
+	for name, value := range finalCookies {
+		cookieParts = append(cookieParts, name+"="+value)
+	}
+
+	return strings.Join(cookieParts, "; ")
+}
+
 func (d *Yun139) step1_password_login() (string, error) {
 	log.Debugf("--- 执行步骤 1: 登录 API ---")
 	loginURL := "https://mail.10086.cn/Login/Login.ashx"
+
+	log.Debugf("--- 执行步骤 1.1: 获取 JSESSIONID ---")
+	getResp, err := base.RestyClient.R().Get(loginURL)
+	if err != nil {
+		return "", fmt.Errorf("step1 get jsessionid failed: %w", err)
+	}
+	var jsessionid string
+	for _, cookie := range getResp.Cookies() {
+		if cookie.Name == "JSESSIONID" {
+			jsessionid = cookie.Value
+			log.Debugf("DEBUG: 提取到新的 JSESSIONID: %s", jsessionid)
+			break
+		}
+	}
+	if jsessionid == "" {
+		log.Warnf("139yun: failed to get JSESSIONID from GET request.")
+	}
 
 	// 密码 SHA1 哈希
 	hashedPassword := sha1Hash(fmt.Sprintf("fetion.com.cn:%s", d.Password))
@@ -772,6 +843,9 @@ func (d *Yun139) step1_password_login() (string, error) {
 	log.Debugf("DEBUG: 生成的 Password 哈希: %s", hashedPassword)
 
 	cguid := strconv.FormatInt(time.Now().UnixMilli(), 10) // 随机生成 cguid
+
+	sanitizedCookie := sanitizeLoginCookies(d.MailCookies, jsessionid)
+	log.Debugf("DEBUG: Sanitized Cookies: %s", sanitizedCookie)
 
 	loginHeaders := map[string]string{
 		"accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
@@ -791,7 +865,7 @@ func (d *Yun139) step1_password_login() (string, error) {
 		"sec-fetch-user":            "?1",
 		"upgrade-insecure-requests": "1",
 		"user-agent":                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0",
-		"Cookie":                    d.MailCookies,
+		"Cookie":                    sanitizedCookie,
 	}
 
 	loginData := url.Values{}
@@ -831,15 +905,23 @@ func (d *Yun139) step1_password_login() (string, error) {
 
 	var sid, extractedCguid string
 
-	// 从 Location 头部提取 sid 和 cguid
+	// 从 Location 头部提取 sid 和 cguid, and handle risk control
 	locationHeader := res.Header().Get("Location")
 	if locationHeader != "" {
+		if ecMatch := regexp.MustCompile(`ec=([^&]+)`).FindStringSubmatch(locationHeader); len(ecMatch) > 1 {
+			return "", fmt.Errorf("risk control triggered: %s", ecMatch[0])
+		}
+
 		sidMatch := regexp.MustCompile(`sid=([^&]+)`).FindStringSubmatch(locationHeader)
 		cguidMatch := regexp.MustCompile(`cguid=([^&]+)`).FindStringSubmatch(locationHeader)
+
 		if len(sidMatch) > 1 {
 			sid = sidMatch[1]
 			log.Debugf("DEBUG: 从 Location 提取到 sid: %s", sid)
+		} else if strings.Contains(locationHeader, "default.html") {
+			return "", errors.New("risk control triggered: sid is missing in default.html redirect")
 		}
+
 		if len(cguidMatch) > 1 {
 			extractedCguid = cguidMatch[1]
 			log.Debugf("DEBUG: 从 Location 提取到 cguid: %s", extractedCguid)
@@ -1228,6 +1310,66 @@ func (d *Yun139) step3_third_party_login(dycpwd string) (string, error) {
 	d.UserDomainID = userDomainId
 	newAuthorization := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("pc:%s:%s", account, authToken)))
 	return newAuthorization, nil
+}
+
+func (d *Yun139) preAuthLogin() (bool, error) {
+	if !strings.Contains(d.MailCookies, "a_l2") {
+		return false, nil // No token, so can't do pre-auth
+	}
+
+	client := base.RestyClient.SetRedirectPolicy(resty.NoRedirectPolicy())
+	defer base.RestyClient.SetRedirectPolicy(resty.FlexibleRedirectPolicy(10))
+
+	resp, err := client.R().
+		SetHeader("Cookie", d.MailCookies).
+		Get("https://appmail.mail.10086.cn/")
+
+	if err != nil && resp == nil {
+		return false, fmt.Errorf("pre-auth request failed: %w", err)
+	}
+
+	if resp.StatusCode() == 302 {
+		location := resp.Header().Get("Location")
+		if strings.HasPrefix(location, "https://appmail.mail.10086.cn/") {
+			log.Infof("139yun: pre-auth redirect, token is invalid.")
+			return false, nil // login is invalid
+		}
+	}
+
+	log.Infof("139yun: pre-auth check successful.")
+
+	// extract sid from cookies
+	var sid string
+	cookies := strings.Split(d.MailCookies, ";")
+	for _, cookie := range cookies {
+		cookie = strings.TrimSpace(cookie)
+		if strings.HasPrefix(cookie, "Os_SSo_Sid=") {
+			sid = strings.TrimPrefix(cookie, "Os_SSo_Sid=")
+			break
+		}
+	}
+
+	if sid == "" {
+		log.Warnf("139yun: Os_SSo_Sid not found in cookies, proceeding with full login.")
+		return false, nil
+	}
+
+	log.Infof("139yun: using existing sid to get token.")
+	token, err := d.step2_get_single_token(sid)
+	if err != nil {
+		log.Warnf("139yun: step2_get_single_token failed with existing sid: %v. proceeding with full login.", err)
+		return false, nil
+	}
+
+	newAuth, err := d.step3_third_party_login(token)
+	if err != nil {
+		return false, fmt.Errorf("step3_third_party_login failed: %w", err)
+	}
+
+	d.Authorization = newAuth
+	op.MustSaveDriverStorage(d)
+
+	return true, nil
 }
 
 func (d *Yun139) loginWithPassword() (string, error) {
