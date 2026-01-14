@@ -44,27 +44,21 @@ func (d *Yun139) GetAddition() driver.Additional {
 func (d *Yun139) Init(ctx context.Context) error {
 	if d.ref == nil {
 		// Validate that if any of the three fields (Username, Password, MailCookies) is provided, all must be provided
-		hasUsername := strings.TrimSpace(d.Username) != ""
-		hasPassword := strings.TrimSpace(d.Password) != ""
-		hasMailCookies := strings.TrimSpace(d.MailCookies) != ""
-		
-		if hasUsername || hasPassword || hasMailCookies {
-			if !hasUsername || !hasPassword || !hasMailCookies {
-				return fmt.Errorf("if any of Username, Password, or MailCookies is provided, all three must be provided")
-			}
+		if err := validateThreeFields(d.Username, d.Password, d.MailCookies); err != nil {
+			return err
 		}
 
 		// More robust validation for MailCookies
-		trimmedCookies := strings.TrimSpace(d.MailCookies)
-		if trimmedCookies != "" {
-			d.MailCookies = trimmedCookies // Update with trimmed value
-			if !strings.Contains(d.MailCookies, "=") || len(strings.Split(d.MailCookies, "=")[0]) == 0 {
-				return fmt.Errorf("MailCookies format is invalid, please check your configuration")
-			}
+		if err := validateMailCookiesFormat(d.MailCookies); err != nil {
+			return err
 		}
+		d.MailCookies = strings.TrimSpace(d.MailCookies) // Update with trimmed value
 
 		// When all three fields (Username, Password, MailCookies) are present, always use password login for validation
 		// This ensures users get immediate feedback when saving settings changes
+		hasUsername := strings.TrimSpace(d.Username) != ""
+		hasPassword := strings.TrimSpace(d.Password) != ""
+		hasMailCookies := strings.TrimSpace(d.MailCookies) != ""
 		allThreePresent := hasUsername && hasPassword && hasMailCookies
 		
 		if len(d.Authorization) == 0 {

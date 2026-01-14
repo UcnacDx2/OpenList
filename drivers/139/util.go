@@ -39,6 +39,32 @@ const (
 )
 
 // do others that not defined in Driver interface
+
+// validateThreeFields checks if any of the three fields is provided, then all must be provided
+func validateThreeFields(username, password, mailCookies string) error {
+	hasUsername := strings.TrimSpace(username) != ""
+	hasPassword := strings.TrimSpace(password) != ""
+	hasMailCookies := strings.TrimSpace(mailCookies) != ""
+	
+	if hasUsername || hasPassword || hasMailCookies {
+		if !hasUsername || !hasPassword || !hasMailCookies {
+			return fmt.Errorf("if any of Username, Password, or MailCookies is provided, all three must be provided")
+		}
+	}
+	return nil
+}
+
+// validateMailCookiesFormat validates the format of MailCookies
+func validateMailCookiesFormat(mailCookies string) error {
+	trimmedCookies := strings.TrimSpace(mailCookies)
+	if trimmedCookies != "" {
+		if !strings.Contains(trimmedCookies, "=") || len(strings.Split(trimmedCookies, "=")[0]) == 0 {
+			return fmt.Errorf("MailCookies format is invalid, please check your configuration")
+		}
+	}
+	return nil
+}
+
 func (d *Yun139) isFamily() bool {
 	return d.Type == "family"
 }
