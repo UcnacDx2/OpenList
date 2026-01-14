@@ -1331,7 +1331,7 @@ func (d *Yun139) preAuthLogin() (bool, error) {
 	for _, cookie := range cookies {
 		cookie = strings.TrimSpace(cookie)
 		if strings.HasPrefix(cookie, "Os_SSo_Sid=") {
-			sid = strings.TrimPrefix(cookie, "Os_SSo_Sid=")
+			sid = strings.TrimSpace(strings.TrimPrefix(cookie, "Os_SSo_Sid="))
 			break
 		}
 	}
