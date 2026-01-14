@@ -1322,6 +1322,40 @@ func (d *Yun139) step3_third_party_login(dycpwd string) (string, error) {
 }
 
 func (d *Yun139) preAuthLogin() (bool, error) {
+	// Step 1: Check if we have the necessary cookies and try to extract sid directly
+	// This optimization skips the appmail.mail.10086.cn check and tries step2 directly
+	var sid string
+	cookies := strings.Split(d.MailCookies, ";")
+	for _, cookie := range cookies {
+		cookie = strings.TrimSpace(cookie)
+		if strings.HasPrefix(cookie, "Os_SSo_Sid=") {
+			sid = strings.TrimPrefix(cookie, "Os_SSo_Sid=")
+			break
+		}
+	}
+
+	// If we have sid, try step2 directly (optimized flow)
+	if sid != "" {
+		log.Infof("139yun: found Os_SSo_Sid in cookies, trying step2 directly.")
+		token, err := d.step2_get_single_token(sid)
+		if err != nil {
+			log.Warnf("139yun: step2_get_single_token failed with existing sid: %v. The sid may have expired, proceeding with full login.", err)
+			return false, nil
+		}
+
+		newAuth, err := d.step3_third_party_login(token)
+		if err != nil {
+			log.Warnf("139yun: step3_third_party_login failed: %v. proceeding with full login.", err)
+			return false, nil
+		}
+
+		d.Authorization = newAuth
+		op.MustSaveDriverStorage(d)
+		log.Infof("139yun: pre-auth login successful using cached sid.")
+		return true, nil
+	}
+
+	// Step 2: Fallback - if no sid, check if we have a_l2 token and validate it
 	if !strings.Contains(d.MailCookies, "a_l2") {
 		return false, nil // No token, so can't do pre-auth
 	}
@@ -1348,41 +1382,10 @@ func (d *Yun139) preAuthLogin() (bool, error) {
 		}
 	}
 
-	log.Infof("139yun: pre-auth check successful.")
-
-	// extract sid from cookies
-	var sid string
-	cookies := strings.Split(d.MailCookies, ";")
-	for _, cookie := range cookies {
-		cookie = strings.TrimSpace(cookie)
-		if strings.HasPrefix(cookie, "Os_SSo_Sid=") {
-			sid = strings.TrimPrefix(cookie, "Os_SSo_Sid=")
-			break
-		}
-	}
-
-	if sid == "" {
-		log.Warnf("139yun: Os_SSo_Sid not found in cookies, proceeding with full login.")
-		return false, nil
-	}
-
-	log.Infof("139yun: using existing sid to get token.")
-	token, err := d.step2_get_single_token(sid)
-	if err != nil {
-		log.Warnf("139yun: step2_get_single_token failed with existing sid: %v. proceeding with full login.", err)
-		return false, nil
-	}
-
-	newAuth, err := d.step3_third_party_login(token)
-	if err != nil {
-		log.Warnf("139yun: step3_third_party_login failed after pre-auth: %v. proceeding with full login.", err)
-		return false, nil
-	}
-
-	d.Authorization = newAuth
-	op.MustSaveDriverStorage(d)
-
-	return true, nil
+	log.Infof("139yun: pre-auth validation successful, but no Os_SSo_Sid found in cookies.")
+	// Even if a_l2 validation passed, without sid we cannot proceed with step2
+	// Return false to trigger full password login flow
+	return false, nil
 }
 
 func (d *Yun139) loginWithPassword() (string, error) {
