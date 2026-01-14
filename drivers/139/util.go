@@ -39,6 +39,33 @@ const (
 )
 
 // do others that not defined in Driver interface
+
+// validateThreeFields checks if any of the three fields is provided, then all must be provided
+func validateThreeFields(username, password, mailCookies string) error {
+	hasUsername := strings.TrimSpace(username) != ""
+	hasPassword := strings.TrimSpace(password) != ""
+	hasMailCookies := strings.TrimSpace(mailCookies) != ""
+	
+	if hasUsername || hasPassword || hasMailCookies {
+		if !hasUsername || !hasPassword || !hasMailCookies {
+			return fmt.Errorf("if any of Username, Password, or MailCookies is provided, all three must be provided")
+		}
+	}
+	return nil
+}
+
+// validateMailCookiesFormat validates the format of MailCookies
+func validateMailCookiesFormat(mailCookies string) error {
+	trimmedCookies := strings.TrimSpace(mailCookies)
+	if trimmedCookies != "" {
+		parts := strings.Split(trimmedCookies, "=")
+		if len(parts) < 2 || len(parts[0]) == 0 {
+			return fmt.Errorf("MailCookies format is invalid, please check your configuration")
+		}
+	}
+	return nil
+}
+
 func (d *Yun139) isFamily() bool {
 	return d.Type == "family"
 }
@@ -1322,35 +1349,10 @@ func (d *Yun139) step3_third_party_login(dycpwd string) (string, error) {
 }
 
 func (d *Yun139) preAuthLogin() (bool, error) {
-	if !strings.Contains(d.MailCookies, "a_l2") {
-		return false, nil // No token, so can't do pre-auth
-	}
-
-	client := resty.New().SetRedirectPolicy(resty.NoRedirectPolicy())
-
-	resp, err := client.R().
-		SetHeader("Cookie", d.MailCookies).
-		Get("https://appmail.mail.10086.cn/")
-
-	if err != nil {
-		// It's not a real error if it's just a redirect being blocked by the policy.
-		// We proceed with the response object to check the status code.
-		if !strings.HasSuffix(err.Error(), "auto redirect is disabled") {
-			return false, fmt.Errorf("pre-auth request failed: %w", err)
-		}
-	}
-
-	if resp.StatusCode() == 302 {
-		location := resp.Header().Get("Location")
-		if strings.HasPrefix(location, "https://appmail.mail.10086.cn/") {
-			log.Infof("139yun: pre-auth redirect, token is invalid.")
-			return false, nil // login is invalid
-		}
-	}
-
-	log.Infof("139yun: pre-auth check successful.")
-
-	// extract sid from cookies
+	// Optimized flow: check if we have step2 required parameters (sid) and try step2 directly
+	// If step2 fails (e.g., due to expired parameters), we'll fall back to step1 in the caller
+	
+	// Extract sid from cookies - this is the parameter needed for step2
 	var sid string
 	cookies := strings.Split(d.MailCookies, ";")
 	for _, cookie := range cookies {
@@ -1362,26 +1364,29 @@ func (d *Yun139) preAuthLogin() (bool, error) {
 	}
 
 	if sid == "" {
-		log.Warnf("139yun: Os_SSo_Sid not found in cookies, proceeding with full login.")
+		log.Infof("139yun: Os_SSo_Sid not found in cookies, need full login.")
 		return false, nil
 	}
 
-	log.Infof("139yun: using existing sid to get token.")
+	// Try step2 directly with the existing sid
+	log.Infof("139yun: found sid in cookies, trying step2 directly.")
 	token, err := d.step2_get_single_token(sid)
 	if err != nil {
-		log.Warnf("139yun: step2_get_single_token failed with existing sid: %v. proceeding with full login.", err)
+		log.Warnf("139yun: step2_get_single_token failed (possibly expired): %v. need full login.", err)
 		return false, nil
 	}
 
+	// If step2 succeeded, proceed with step3
 	newAuth, err := d.step3_third_party_login(token)
 	if err != nil {
-		log.Warnf("139yun: step3_third_party_login failed after pre-auth: %v. proceeding with full login.", err)
+		log.Warnf("139yun: step3_third_party_login failed: %v. need full login.", err)
 		return false, nil
 	}
 
 	d.Authorization = newAuth
 	op.MustSaveDriverStorage(d)
 
+	log.Infof("139yun: pre-auth login successful using existing sid.")
 	return true, nil
 }
 
