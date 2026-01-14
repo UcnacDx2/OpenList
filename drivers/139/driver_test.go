@@ -94,7 +94,7 @@ func TestValidateThreeFields(t *testing.T) {
 			if tt.shouldError {
 				if err == nil {
 					t.Errorf("Expected error but got nil")
-				} else if tt.errorContains != "" && !contains(err.Error(), tt.errorContains) {
+				} else if tt.errorContains != "" && !strings.Contains(err.Error(), tt.errorContains) {
 					t.Errorf("Expected error to contain '%s', got: %s", tt.errorContains, err.Error())
 				}
 			} else {
@@ -160,10 +160,5 @@ func TestMailCookiesFormat(t *testing.T) {
 			}
 		})
 	}
-}
-
-// Helper function to check if a string contains a substring
-func contains(s, substr string) bool {
-	return strings.Contains(s, substr)
 }
 
