@@ -74,6 +74,11 @@ func (d *Yun139) refreshToken() error {
 	if d.ref != nil {
 		return d.ref.refreshToken()
 	}
+	return d.checkAndRenewToken()
+}
+
+// checkAndRenewToken checks the token's validity and renews it if necessary.
+func (d *Yun139) checkAndRenewToken() error {
 	decode, err := base64.StdEncoding.DecodeString(d.Authorization)
 	if err != nil {
 		return fmt.Errorf("authorization decode failed: %s", err)
@@ -94,11 +99,13 @@ func (d *Yun139) refreshToken() error {
 	}
 	expiration -= time.Now().UnixMilli()
 	if expiration > 1000*60*60*24*15 {
-		// Authorization有效期大于15天无需刷新
+		// No need to refresh
 		return nil
 	}
 	if expiration < 0 {
-		return fmt.Errorf("authorization has expired")
+		log.Warnf("139yun: authorization has expired, trying to login with password.")
+		_, err := d.loginWithPassword()
+		return err
 	}
 
 	url := "https://aas.caiyun.feixin.10086.cn:443/tellin/authTokenRefresh.do"
@@ -111,12 +118,8 @@ func (d *Yun139) refreshToken() error {
 		Post(url)
 	if err != nil || resp.Return != "0" {
 		log.Warnf("139yun: failed to refresh token with old token: %v, desc: %s. trying to login with password.", err, resp.Desc)
-		newAuth, loginErr := d.loginWithPassword()
-		log.Debugf("newAuth: Ok: %s", newAuth)
-		if loginErr != nil {
-			return fmt.Errorf("failed to login with password after refresh failed: %w", loginErr)
-		}
-		return nil
+		_, loginErr := d.loginWithPassword()
+		return loginErr
 	}
 
 	d.Authorization = base64.StdEncoding.EncodeToString([]byte(splits[0] + ":" + splits[1] + ":" + resp.Token))
@@ -989,7 +992,7 @@ func (d *Yun139) step2_get_single_token(sid string) (string, error) {
 		}
 	}
 	if rmkey == "" {
-		return "", errors.New("RMKEY not found in MailCookies")
+		return "", errors.New("authentication failed: RMKEY not found in MailCookies")
 	}
 
 	exchangePassidHeaders := map[string]string{
@@ -1321,62 +1324,42 @@ func (d *Yun139) step3_third_party_login(dycpwd string) (string, error) {
 	return newAuthorization, nil
 }
 
+// preAuthLogin attempts to authenticate using existing cookies.
+// It checks for the presence of "Os_SSo_Sid" and "RMKEY" in the cookies.
+// If both are present, it proceeds with step2 and step3 of the authentication process.
+// If they are not present, or if any step fails, it returns false, indicating
+// that a full login with a password is required.
 func (d *Yun139) preAuthLogin() (bool, error) {
-	if !strings.Contains(d.MailCookies, "a_l2") {
-		return false, nil // No token, so can't do pre-auth
-	}
-
-	client := resty.New().SetRedirectPolicy(resty.NoRedirectPolicy())
-
-	resp, err := client.R().
-		SetHeader("Cookie", d.MailCookies).
-		Get("https://appmail.mail.10086.cn/")
-
-	if err != nil {
-		// It's not a real error if it's just a redirect being blocked by the policy.
-		// We proceed with the response object to check the status code.
-		if !strings.HasSuffix(err.Error(), "auto redirect is disabled") {
-			return false, fmt.Errorf("pre-auth request failed: %w", err)
-		}
-	}
-
-	if resp.StatusCode() == 302 {
-		location := resp.Header().Get("Location")
-		if strings.HasPrefix(location, "https://appmail.mail.10086.cn/") {
-			log.Infof("139yun: pre-auth redirect, token is invalid.")
-			return false, nil // login is invalid
-		}
-	}
-
-	log.Infof("139yun: pre-auth check successful.")
-
-	// extract sid from cookies
-	var sid string
 	cookies := strings.Split(d.MailCookies, ";")
+	var sid, rmkey string
+
 	for _, cookie := range cookies {
 		cookie = strings.TrimSpace(cookie)
 		if strings.HasPrefix(cookie, "Os_SSo_Sid=") {
 			sid = strings.TrimPrefix(cookie, "Os_SSo_Sid=")
-			break
+		} else if strings.HasPrefix(cookie, "RMKEY=") {
+			rmkey = strings.TrimPrefix(cookie, "RMKEY=")
 		}
 	}
 
-	if sid == "" {
-		log.Warnf("139yun: Os_SSo_Sid not found in cookies, proceeding with full login.")
+	if sid == "" || rmkey == "" {
+		log.Infof("139yun: Os_SSo_Sid or RMKEY not found in cookies, proceeding with full login.")
 		return false, nil
 	}
 
 	log.Infof("139yun: using existing sid to get token.")
 	token, err := d.step2_get_single_token(sid)
 	if err != nil {
-		log.Warnf("139yun: step2_get_single_token failed with existing sid: %v. proceeding with full login.", err)
-		return false, nil
+		if strings.Contains(err.Error(), "authentication failed") {
+			log.Warnf("139yun: step2_get_single_token failed with existing sid due to invalid session: %v. proceeding with full login.", err)
+			return false, nil
+		}
+		return false, fmt.Errorf("step2_get_single_token failed: %w", err)
 	}
 
 	newAuth, err := d.step3_third_party_login(token)
 	if err != nil {
-		log.Warnf("139yun: step3_third_party_login failed after pre-auth: %v. proceeding with full login.", err)
-		return false, nil
+		return false, fmt.Errorf("step3_third_party_login failed: %w", err)
 	}
 
 	d.Authorization = newAuth

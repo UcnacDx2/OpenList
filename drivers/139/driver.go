@@ -9,6 +9,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OpenListTeam/OpenList/v4/drivers/base"
@@ -31,6 +32,8 @@ type Yun139 struct {
 	ref               *Yun139
 	PersonalCloudHost string
 	RootPath          string
+	loginOnce         sync.Once
+	initErr           error
 }
 
 func (d *Yun139) Config() driver.Config {
@@ -43,62 +46,6 @@ func (d *Yun139) GetAddition() driver.Additional {
 
 func (d *Yun139) Init(ctx context.Context) error {
 	if d.ref == nil {
-		// More robust validation for MailCookies
-		trimmedCookies := strings.TrimSpace(d.MailCookies)
-		if trimmedCookies != "" {
-			d.MailCookies = trimmedCookies // Update with trimmed value
-			if !strings.Contains(d.MailCookies, "=") || len(strings.Split(d.MailCookies, "=")[0]) == 0 {
-				return fmt.Errorf("MailCookies format is invalid, please check your configuration")
-			}
-		}
-
-		if len(d.Authorization) == 0 {
-			if d.Username != "" && d.Password != "" {
-				log.Infof("139yun: authorization is empty, trying to login.")
-				loggedIn, err := d.preAuthLogin()
-				if err != nil {
-					return fmt.Errorf("pre-auth login failed: %w", err)
-				}
-				if !loggedIn {
-					log.Infof("139yun: pre-auth failed, trying to login with password.")
-					newAuth, err := d.loginWithPassword()
-					log.Debugf("newAuth: Ok: %s", newAuth)
-					if err != nil {
-						return fmt.Errorf("login with password failed: %w", err)
-					}
-				}
-			} else {
-				return fmt.Errorf("authorization is empty and username/password is not provided")
-			}
-		}
-		err := d.refreshToken()
-		if err != nil {
-			return err
-		}
-
-		// Query Route Policy
-		var resp QueryRoutePolicyResp
-		_, err = d.requestRoute(base.Json{
-			"userInfo": base.Json{
-				"userType":    1,
-				"accountType": 1,
-				"accountName": d.Account,
-			},
-			"modAddrType": 1,
-		}, &resp)
-		if err != nil {
-			return err
-		}
-		for _, policyItem := range resp.Data.RoutePolicyList {
-			if policyItem.ModName == "personal" {
-				d.PersonalCloudHost = policyItem.HttpsUrl
-				break
-			}
-		}
-		if len(d.PersonalCloudHost) == 0 {
-			return fmt.Errorf("PersonalCloudHost is empty")
-		}
-
 		d.cron = cron.NewCron(time.Hour * 12)
 		d.cron.Do(func() {
 			err := d.refreshToken()
@@ -107,39 +54,116 @@ func (d *Yun139) Init(ctx context.Context) error {
 			}
 		})
 	}
-	switch d.Addition.Type {
-	case MetaPersonalNew:
-		if len(d.Addition.RootFolderID) == 0 {
-			d.RootFolderID = "/"
-		}
-	case MetaPersonal:
-		if len(d.Addition.RootFolderID) == 0 {
-			d.RootFolderID = "root"
-		}
-	case MetaGroup:
-		if len(d.Addition.RootFolderID) == 0 {
-			d.RootFolderID = d.CloudID
-		}
-		_, err := d.groupGetFiles(d.RootFolderID)
-		if err != nil {
-			return err
-		}
-	case MetaFamily:
-		if len(d.Addition.RootFolderID) == 0 {
-			// Attempt to obtain data.path as the root via a query and persist it.
-			if root, err := d.getFamilyRootPath(d.CloudID); err == nil && root != "" {
-				d.RootFolderID = root
-				op.MustSaveDriverStorage(d)
+
+	return d.ensureLoggedIn(ctx)
+}
+
+func (d *Yun139) ensureLoggedIn(ctx context.Context) error {
+	if d.ref != nil {
+		return d.ref.ensureLoggedIn(ctx)
+	}
+
+	d.loginOnce.Do(func() {
+		// More robust validation for MailCookies
+		trimmedCookies := strings.TrimSpace(d.MailCookies)
+		if trimmedCookies != "" {
+			d.MailCookies = trimmedCookies // Update with trimmed value
+			if !strings.Contains(d.MailCookies, "=") || len(strings.Split(d.MailCookies, "=")[0]) == 0 {
+				d.initErr = fmt.Errorf("MailCookies format is invalid, please check your configuration")
+				return
 			}
 		}
-		_, err := d.familyGetFiles(d.RootFolderID)
-		if err != nil {
-			return err
+
+		// Perform login if authorization is empty
+		if len(d.Authorization) == 0 {
+			if d.Username != "" && d.Password != "" {
+				log.Infof("139yun: authorization is empty, trying to login.")
+				loggedIn, err := d.preAuthLogin()
+				if err != nil {
+					d.initErr = fmt.Errorf("pre-auth login failed: %w", err)
+					return
+				}
+				if !loggedIn {
+					log.Infof("139yun: pre-auth failed, trying to login with password.")
+					if _, err := d.loginWithPassword(); err != nil {
+						d.initErr = fmt.Errorf("login with password failed: %w", err)
+						return
+					}
+				}
+			} else {
+				d.initErr = fmt.Errorf("authorization is empty and username/password is not provided")
+				return
+			}
 		}
-	default:
-		return errs.NotImplement
-	}
-	return nil
+
+		// Always refresh token to ensure it's valid
+		if err := d.refreshToken(); err != nil {
+			d.initErr = err
+			return
+		}
+
+		// Query Route Policy
+		var resp QueryRoutePolicyResp
+		_, err := d.requestRoute(base.Json{
+			"userInfo": base.Json{
+				"userType":    1,
+				"accountType": 1,
+				"accountName": d.Account,
+			},
+			"modAddrType": 1,
+		}, &resp)
+		if err != nil {
+			d.initErr = err
+			return
+		}
+		for _, policyItem := range resp.Data.RoutePolicyList {
+			if policyItem.ModName == "personal" {
+				d.PersonalCloudHost = policyItem.HttpsUrl
+				break
+			}
+		}
+		if len(d.PersonalCloudHost) == 0 {
+			d.initErr = fmt.Errorf("PersonalCloudHost is empty")
+			return
+		}
+
+		// Initial folder fetch
+		switch d.Addition.Type {
+		case MetaPersonalNew:
+			if len(d.Addition.RootFolderID) == 0 {
+				d.RootFolderID = "/"
+			}
+		case MetaPersonal:
+			if len(d.Addition.RootFolderID) == 0 {
+				d.RootFolderID = "root"
+			}
+		case MetaGroup:
+			if len(d.Addition.RootFolderID) == 0 {
+				d.RootFolderID = d.CloudID
+			}
+			_, err := d.groupGetFiles(d.RootFolderID)
+			if err != nil {
+				d.initErr = err
+				return
+			}
+		case MetaFamily:
+			if len(d.Addition.RootFolderID) == 0 {
+				if root, err := d.getFamilyRootPath(d.CloudID); err == nil && root != "" {
+					d.RootFolderID = root
+					op.MustSaveDriverStorage(d)
+				}
+			}
+			_, err := d.familyGetFiles(d.RootFolderID)
+			if err != nil {
+				d.initErr = err
+				return
+			}
+		default:
+			d.initErr = errs.NotImplement
+		}
+	})
+
+	return d.initErr
 }
 
 func (d *Yun139) InitReference(storage driver.Driver) error {
@@ -160,6 +184,9 @@ func (d *Yun139) Drop(ctx context.Context) error {
 }
 
 func (d *Yun139) List(ctx context.Context, dir model.Obj, args model.ListArgs) ([]model.Obj, error) {
+	if err := d.ensureLoggedIn(ctx); err != nil {
+		return nil, err
+	}
 	switch d.Addition.Type {
 	case MetaPersonalNew:
 		return d.personalGetFiles(dir.GetID())
@@ -175,6 +202,9 @@ func (d *Yun139) List(ctx context.Context, dir model.Obj, args model.ListArgs) (
 }
 
 func (d *Yun139) Link(ctx context.Context, file model.Obj, args model.LinkArgs) (*model.Link, error) {
+	if err := d.ensureLoggedIn(ctx); err != nil {
+		return nil, err
+	}
 	var url string
 	var err error
 	switch d.Addition.Type {
@@ -196,6 +226,9 @@ func (d *Yun139) Link(ctx context.Context, file model.Obj, args model.LinkArgs) 
 }
 
 func (d *Yun139) MakeDir(ctx context.Context, parentDir model.Obj, dirName string) error {
+	if err := d.ensureLoggedIn(ctx); err != nil {
+		return err
+	}
 	var err error
 	switch d.Addition.Type {
 	case MetaPersonalNew:
@@ -253,6 +286,9 @@ func (d *Yun139) MakeDir(ctx context.Context, parentDir model.Obj, dirName strin
 }
 
 func (d *Yun139) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj, error) {
+	if err := d.ensureLoggedIn(ctx); err != nil {
+		return nil, err
+	}
 	switch d.Addition.Type {
 	case MetaPersonalNew:
 		data := base.Json{
@@ -364,6 +400,9 @@ func (d *Yun139) Move(ctx context.Context, srcObj, dstDir model.Obj) (model.Obj,
 }
 
 func (d *Yun139) Rename(ctx context.Context, srcObj model.Obj, newName string) error {
+	if err := d.ensureLoggedIn(ctx); err != nil {
+		return err
+	}
 	var err error
 	switch d.Addition.Type {
 	case MetaPersonalNew:
@@ -473,6 +512,9 @@ func (d *Yun139) Rename(ctx context.Context, srcObj model.Obj, newName string) e
 }
 
 func (d *Yun139) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
+	if err := d.ensureLoggedIn(ctx); err != nil {
+		return err
+	}
 	var err error
 	switch d.Addition.Type {
 	case MetaPersonalNew:
@@ -542,6 +584,9 @@ func (d *Yun139) Copy(ctx context.Context, srcObj, dstDir model.Obj) error {
 }
 
 func (d *Yun139) Remove(ctx context.Context, obj model.Obj) error {
+	if err := d.ensureLoggedIn(ctx); err != nil {
+		return err
+	}
 	switch d.Addition.Type {
 	case MetaPersonalNew:
 		data := base.Json{
@@ -632,6 +677,9 @@ func (d *Yun139) getPartSize(size int64) int64 {
 }
 
 func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStreamer, up driver.UpdateProgress) error {
+	if err := d.ensureLoggedIn(ctx); err != nil {
+		return err
+	}
 	switch d.Addition.Type {
 	case MetaPersonalNew:
 		var err error
@@ -933,6 +981,9 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 }
 
 func (d *Yun139) Other(ctx context.Context, args model.OtherArgs) (interface{}, error) {
+	if err := d.ensureLoggedIn(ctx); err != nil {
+		return nil, err
+	}
 	switch d.Addition.Type {
 	case MetaPersonalNew:
 		var resp base.Json
@@ -958,6 +1009,9 @@ func (d *Yun139) Other(ctx context.Context, args model.OtherArgs) (interface{}, 
 }
 
 func (d *Yun139) GetDetails(ctx context.Context) (*model.StorageDetails, error) {
+	if err := d.ensureLoggedIn(ctx); err != nil {
+		return nil, err
+	}
 	if d.UserDomainID == "" {
 		return nil, errs.NotImplement
 	}

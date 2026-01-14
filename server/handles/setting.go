@@ -48,12 +48,20 @@ func GetSetting(c *gin.Context) {
 }
 
 func SaveSettings(c *gin.Context) {
-	var req []model.SettingItem
+	var req struct {
+		Settings []model.SettingItem `json:"settings"`
+		Password string              `json:"password"`
+	}
 	if err := c.ShouldBind(&req); err != nil {
 		common.ErrorResp(c, err, 400)
 		return
 	}
-	if err := op.SaveSettingItems(req); err != nil {
+	user := common.MustGetUser(c)
+	if !user.VerifyPassword(req.Password) {
+		common.ErrorResp(c, nil, 401, "wrong password")
+		return
+	}
+	if err := op.SaveSettingItems(req.Settings); err != nil {
 		common.ErrorResp(c, err, 500)
 	} else {
 		common.SuccessResp(c)
