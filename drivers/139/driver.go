@@ -52,8 +52,11 @@ func (d *Yun139) Init(ctx context.Context) error {
 			}
 		}
 
-		if len(d.Authorization) == 0 {
-			if d.Username != "" && d.Password != "" {
+		// When Init is called (during manual settings update or initial setup),
+		// always validate password if credentials are provided to give immediate feedback
+		if d.Username != "" && d.Password != "" {
+			if len(d.Authorization) == 0 {
+				// No authorization, try pre-auth first for efficiency
 				log.Infof("139yun: authorization is empty, trying to login.")
 				loggedIn, err := d.preAuthLogin()
 				if err != nil {
@@ -68,9 +71,19 @@ func (d *Yun139) Init(ctx context.Context) error {
 					}
 				}
 			} else {
-				return fmt.Errorf("authorization is empty and username/password is not provided")
+				// Authorization exists - this is likely a manual settings update
+				// Validate password to provide immediate feedback
+				log.Infof("139yun: validating credentials for settings update.")
+				_, err := d.loginWithPassword()
+				if err != nil {
+					return fmt.Errorf("password validation failed: %w", err)
+				}
+				log.Infof("139yun: password validation successful.")
 			}
+		} else if len(d.Authorization) == 0 {
+			return fmt.Errorf("authorization is empty and username/password is not provided")
 		}
+		
 		err := d.refreshToken()
 		if err != nil {
 			return err
