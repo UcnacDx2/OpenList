@@ -52,27 +52,25 @@ func (d *Yun139) Init(ctx context.Context) error {
 			}
 		}
 
-		// Always validate credentials on Init to ensure settings are correct
-		// This prevents automatic renewal from failing with wrong passwords
+		// When all three elements (MailCookies, Username, Password) are present,
+		// always validate credentials with password login to ensure settings are correct.
+		// This prevents automatic renewal from failing with wrong passwords.
 		var err error
-		if len(d.Authorization) == 0 {
-			if d.Username != "" && d.Password != "" {
-				log.Infof("139yun: authorization is empty, performing password login to validate credentials.")
-				// Password login validates credentials, updates d.Authorization, and saves via op.MustSaveDriverStorage()
-				_, err = d.loginWithPassword()
-				if err != nil {
-					return fmt.Errorf("login with password failed: %w", err)
-				}
-			} else {
-				return fmt.Errorf("authorization is empty and username/password is not provided")
-			}
-		} else {
-			// When authorization exists, refresh it if needed
-			// The refreshToken will use password login as fallback if token refresh fails
-			err = d.refreshToken()
+		if d.MailCookies != "" && d.Username != "" && d.Password != "" {
+			log.Infof("139yun: all credentials present, performing password login to validate.")
+			// Password login validates credentials, updates d.Authorization, and saves via op.MustSaveDriverStorage()
+			_, err = d.loginWithPassword()
 			if err != nil {
-				return err
+				return fmt.Errorf("login with password failed: %w", err)
 			}
+		} else if len(d.Authorization) == 0 {
+			return fmt.Errorf("authorization is empty and username/password/mail_cookies is not fully provided")
+		}
+		
+		// Always refresh token for renewal (uses original fallback behavior)
+		err = d.refreshToken()
+		if err != nil {
+			return err
 		}
 
 		// Query Route Policy
