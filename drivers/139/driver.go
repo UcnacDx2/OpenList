@@ -52,11 +52,31 @@ func (d *Yun139) Init(ctx context.Context) error {
 			}
 		}
 
+		// Validate that if any credential is provided, all three must be provided (all-or-nothing rule)
+		hasMailCookies := d.MailCookies != ""
+		hasUsername := d.Username != ""
+		hasPassword := d.Password != ""
+		credentialsCount := 0
+		if hasMailCookies {
+			credentialsCount++
+		}
+		if hasUsername {
+			credentialsCount++
+		}
+		if hasPassword {
+			credentialsCount++
+		}
+		
+		// If any credential is provided but not all, return error
+		if credentialsCount > 0 && credentialsCount < 3 {
+			return fmt.Errorf("if any of mail_cookies, username, or password is provided, all three must be provided")
+		}
+
 		// When all three elements (MailCookies, Username, Password) are present,
 		// always validate credentials with password login to ensure settings are correct.
 		// This prevents automatic renewal from failing with wrong passwords.
 		var err error
-		if d.MailCookies != "" && d.Username != "" && d.Password != "" {
+		if hasMailCookies && hasUsername && hasPassword {
 			log.Infof("139yun: all credentials present, performing password login to validate.")
 			// Password login validates credentials, updates d.Authorization, and saves via op.MustSaveDriverStorage()
 			_, err = d.loginWithPassword()
@@ -64,7 +84,7 @@ func (d *Yun139) Init(ctx context.Context) error {
 				return fmt.Errorf("login with password failed: %w", err)
 			}
 		} else if len(d.Authorization) == 0 {
-			return fmt.Errorf("authorization is empty and username/password/mail_cookies is not fully provided")
+			return fmt.Errorf("authorization is empty and credentials are not provided")
 		}
 		
 		// Always refresh token for renewal (uses original fallback behavior)
