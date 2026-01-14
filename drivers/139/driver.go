@@ -83,7 +83,7 @@ func (d *Yun139) Init(ctx context.Context) error {
 		} else if len(d.Authorization) == 0 {
 			return fmt.Errorf("authorization is empty and username/password is not provided")
 		}
-		
+
 		err := d.refreshToken()
 		if err != nil {
 			return err
