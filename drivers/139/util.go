@@ -1353,6 +1353,8 @@ func (d *Yun139) loginWithPassword() (string, error) {
 // 1. Check if we have necessary parameters for step2 (sid from cookies)
 // 2. Try step2 directly
 // 3. If step2 fails, fall back to full password login (step1 + step2 + step3)
+// Note: This function calls loginWithPassword() as a fallback, but there's no recursion risk
+// since loginWithPassword() is a straight-through function that doesn't call back to this.
 func (d *Yun139) loginWithOptimizedFlow() (string, error) {
 	if d.Username == "" || d.Password == "" || d.MailCookies == "" {
 		return "", errors.New("username, password or mail_cookies is empty")

@@ -65,9 +65,15 @@ func (d *Yun139) Init(ctx context.Context) error {
 				return fmt.Errorf("authorization is empty and username/password is not provided")
 			}
 		} else {
-			// Authorization exists - this is either a reload or user save
-			// Force password login to validate credentials on user-triggered save
-			// This prevents issues with expired passwords during automatic renewal
+			// Authorization exists - this could be a service restart or user-triggered settings save
+			// We force password login in both cases to validate credentials
+			// This ensures:
+			// 1. When user saves settings, password is validated immediately (main requirement)
+			// 2. On service restart, we start with freshly validated credentials
+			// 3. Automatic token renewal (via refreshToken cron) doesn't trigger this path
+			// Note: This prevents the issue where automatic renewal fails due to password changes,
+			// requiring manual intervention. By validating on settings save/restart, we catch
+			// password mismatches early.
 			if d.Username != "" && d.Password != "" && d.MailCookies != "" {
 				log.Infof("139yun: re-initialization with existing auth, forcing password login to validate credentials.")
 				newAuth, err := d.loginWithPassword()
