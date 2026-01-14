@@ -52,25 +52,31 @@ func (d *Yun139) Init(ctx context.Context) error {
 			}
 		}
 
-		if len(d.Authorization) == 0 {
-			if d.Username != "" && d.Password != "" {
-				log.Infof("139yun: authorization is empty, trying to login.")
-				loggedIn, err := d.preAuthLogin()
-				if err != nil {
-					return fmt.Errorf("pre-auth login failed: %w", err)
-				}
-				if !loggedIn {
-					log.Infof("139yun: pre-auth failed, trying to login with password.")
-					newAuth, err := d.loginWithPassword()
-					log.Debugf("newAuth: Ok: %s", newAuth)
-					if err != nil {
-						return fmt.Errorf("login with password failed: %w", err)
-					}
-				}
+		// Handle login if required
+		if d.Password != "" && (d.ForceLogin || len(d.Authorization) == 0) {
+			if d.ForceLogin {
+				log.Infof("139yun: force_login is true, forcing a new login with password.")
 			} else {
-				return fmt.Errorf("authorization is empty and username/password is not provided")
+				log.Infof("139yun: authorization is empty, trying to login.")
+			}
+			// `loginWithPassword` is called with `true` for a forced login, `false` otherwise.
+			// This parameter determines whether to start from step 1 (password) or try step 2 (existing session).
+			_, err := d.loginWithPassword(d.ForceLogin)
+			if err != nil {
+				return fmt.Errorf("login failed: %w", err)
+			}
+			if d.ForceLogin {
+				// Disable force_login for subsequent inits and save.
+				d.ForceLogin = false
+				op.MustSaveDriverStorage(d)
 			}
 		}
+
+		// After attempting login, if auth is still missing, it's a fatal error.
+		if len(d.Authorization) == 0 {
+			return fmt.Errorf("authorization is empty and username/password is not provided or login failed")
+		}
+
 		err := d.refreshToken()
 		if err != nil {
 			return err

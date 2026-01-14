@@ -1321,84 +1321,54 @@ func (d *Yun139) step3_third_party_login(dycpwd string) (string, error) {
 	return newAuthorization, nil
 }
 
-func (d *Yun139) preAuthLogin() (bool, error) {
-	if !strings.Contains(d.MailCookies, "a_l2") {
-		return false, nil // No token, so can't do pre-auth
-	}
-
-	client := resty.New().SetRedirectPolicy(resty.NoRedirectPolicy())
-
-	resp, err := client.R().
-		SetHeader("Cookie", d.MailCookies).
-		Get("https://appmail.mail.10086.cn/")
-
-	if err != nil {
-		// It's not a real error if it's just a redirect being blocked by the policy.
-		// We proceed with the response object to check the status code.
-		if !strings.HasSuffix(err.Error(), "auto redirect is disabled") {
-			return false, fmt.Errorf("pre-auth request failed: %w", err)
-		}
-	}
-
-	if resp.StatusCode() == 302 {
-		location := resp.Header().Get("Location")
-		if strings.HasPrefix(location, "https://appmail.mail.10086.cn/") {
-			log.Infof("139yun: pre-auth redirect, token is invalid.")
-			return false, nil // login is invalid
-		}
-	}
-
-	log.Infof("139yun: pre-auth check successful.")
-
-	// extract sid from cookies
-	var sid string
-	cookies := strings.Split(d.MailCookies, ";")
-	for _, cookie := range cookies {
-		cookie = strings.TrimSpace(cookie)
-		if strings.HasPrefix(cookie, "Os_SSo_Sid=") {
-			sid = strings.TrimPrefix(cookie, "Os_SSo_Sid=")
-			break
-		}
-	}
-
-	if sid == "" {
-		log.Warnf("139yun: Os_SSo_Sid not found in cookies, proceeding with full login.")
-		return false, nil
-	}
-
-	log.Infof("139yun: using existing sid to get token.")
-	token, err := d.step2_get_single_token(sid)
-	if err != nil {
-		log.Warnf("139yun: step2_get_single_token failed with existing sid: %v. proceeding with full login.", err)
-		return false, nil
-	}
-
-	newAuth, err := d.step3_third_party_login(token)
-	if err != nil {
-		log.Warnf("139yun: step3_third_party_login failed after pre-auth: %v. proceeding with full login.", err)
-		return false, nil
-	}
-
-	d.Authorization = newAuth
-	op.MustSaveDriverStorage(d)
-
-	return true, nil
-}
-
-func (d *Yun139) loginWithPassword() (string, error) {
+func (d *Yun139) loginWithPassword(force bool) (string, error) {
 	if d.Username == "" || d.Password == "" || d.MailCookies == "" {
 		return "", errors.New("username, password or mail_cookies is empty")
 	}
 
-	passId, err := d.step1_password_login()
-	if err != nil {
-		return "", err
-	}
-	log.Infof("Step 1 success, passId: %s", passId)
+	var sid string
+	var err error
 
-	token, err := d.step2_get_single_token(passId)
+	// If not forcing, try to optimistically use the existing session.
+	if !force {
+		log.Infof("139yun: attempting to use existing session...")
+		// Extract sid from cookies
+		cookies := strings.Split(d.MailCookies, ";")
+		for _, cookie := range cookies {
+			cookie = strings.TrimSpace(cookie)
+			if strings.HasPrefix(cookie, "Os_SSo_Sid=") {
+				sid = strings.TrimPrefix(cookie, "Os_SSo_Sid=")
+				break
+			}
+		}
+	}
+
+	// If we need to perform a full login (either forced or because sid is missing).
+	if force || sid == "" {
+		if sid == "" {
+			log.Warnf("139yun: Os_SSo_Sid not found in cookies, proceeding with full login.")
+		}
+		sid, err = d.step1_password_login()
+		if err != nil {
+			return "", err
+		}
+		log.Infof("Step 1 success, sid: %s", sid)
+	}
+
+	// Now, attempt to get the token. If the initial sid was invalid, this will fail.
+	token, err := d.step2_get_single_token(sid)
 	if err != nil {
-		return "", err
+		log.Warnf("139yun: step2_get_single_token failed with sid '%s': %v. Retrying with a fresh login.", sid, err)
+		// The session is likely invalid, so we must perform a full login now.
+		sid, err = d.step1_password_login()
+		if err != nil {
+			return "", fmt.Errorf("step1 password login failed after session failure: %w", err)
+		}
+		log.Infof("Step 1 (retry) success, sid: %s", sid)
+		token, err = d.step2_get_single_token(sid)
+		if err != nil {
+			return "", fmt.Errorf("step2 get single token failed after retry: %w", err)
+		}
 	}
 	log.Infof("Step 2 success, token: %s", token)
 
