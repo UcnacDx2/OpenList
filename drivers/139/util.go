@@ -1321,67 +1321,52 @@ func (d *Yun139) step3_third_party_login(dycpwd string) (string, error) {
 	return newAuthorization, nil
 }
 
+// preAuthLogin attempts to login using existing cookies without making a request to appmail.mail.10086.cn
+// It checks if step2 required parameters (Os_SSo_Sid and RMKEY) exist and tries step2 first
+// Returns true if pre-auth succeeds, false if it fails (caller should proceed with full password login)
 func (d *Yun139) preAuthLogin() (bool, error) {
-	if !strings.Contains(d.MailCookies, "a_l2") {
-		return false, nil // No token, so can't do pre-auth
-	}
-
-	client := resty.New().SetRedirectPolicy(resty.NoRedirectPolicy())
-
-	resp, err := client.R().
-		SetHeader("Cookie", d.MailCookies).
-		Get("https://appmail.mail.10086.cn/")
-
-	if err != nil {
-		// It's not a real error if it's just a redirect being blocked by the policy.
-		// We proceed with the response object to check the status code.
-		if !strings.HasSuffix(err.Error(), "auto redirect is disabled") {
-			return false, fmt.Errorf("pre-auth request failed: %w", err)
-		}
-	}
-
-	if resp.StatusCode() == 302 {
-		location := resp.Header().Get("Location")
-		if strings.HasPrefix(location, "https://appmail.mail.10086.cn/") {
-			log.Infof("139yun: pre-auth redirect, token is invalid.")
-			return false, nil // login is invalid
-		}
-	}
-
-	log.Infof("139yun: pre-auth check successful.")
-
-	// extract sid from cookies
+	// Extract sid and check for RMKEY from cookies - both are required for step2
 	var sid string
+	hasRMKEY := false
 	cookies := strings.Split(d.MailCookies, ";")
 	for _, cookie := range cookies {
 		cookie = strings.TrimSpace(cookie)
 		if strings.HasPrefix(cookie, "Os_SSo_Sid=") {
-			sid = strings.TrimPrefix(cookie, "Os_SSo_Sid=")
+			sid = strings.TrimSpace(strings.TrimPrefix(cookie, "Os_SSo_Sid="))
+		}
+		if strings.HasPrefix(cookie, "RMKEY=") {
+			hasRMKEY = true
+		}
+		// Early termination once both required cookies are found
+		if sid != "" && hasRMKEY {
 			break
 		}
 	}
 
-	if sid == "" {
-		log.Warnf("139yun: Os_SSo_Sid not found in cookies, proceeding with full login.")
+	if sid == "" || !hasRMKEY {
+		log.Warnf("139yun: Os_SSo_Sid or RMKEY not found in cookies, cannot use pre-auth.")
 		return false, nil
 	}
 
-	log.Infof("139yun: using existing sid to get token.")
+	log.Infof("139yun: found Os_SSo_Sid in cookies, attempting step2 directly.")
+	// Try step2 with existing sid
 	token, err := d.step2_get_single_token(sid)
 	if err != nil {
-		log.Warnf("139yun: step2_get_single_token failed with existing sid: %v. proceeding with full login.", err)
+		log.Warnf("139yun: step2_get_single_token failed with existing sid: %v. sid may be expired.", err)
+		// sid is expired or invalid, return false so caller can perform full password login
 		return false, nil
 	}
 
+	// Try step3
 	newAuth, err := d.step3_third_party_login(token)
 	if err != nil {
-		log.Warnf("139yun: step3_third_party_login failed after pre-auth: %v. proceeding with full login.", err)
+		log.Warnf("139yun: step3_third_party_login failed: %v. proceeding with full login.", err)
 		return false, nil
 	}
 
 	d.Authorization = newAuth
 	op.MustSaveDriverStorage(d)
-
+	log.Infof("139yun: pre-auth login successful using existing sid.")
 	return true, nil
 }
 
