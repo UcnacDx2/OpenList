@@ -1337,6 +1337,10 @@ func (d *Yun139) preAuthLogin() (bool, error) {
 		if strings.HasPrefix(cookie, "RMKEY=") {
 			hasRMKEY = true
 		}
+		// Early termination once both required cookies are found
+		if sid != "" && hasRMKEY {
+			break
+		}
 	}
 
 	if sid == "" || !hasRMKEY {
