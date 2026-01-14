@@ -58,7 +58,8 @@ func validateThreeFields(username, password, mailCookies string) error {
 func validateMailCookiesFormat(mailCookies string) error {
 	trimmedCookies := strings.TrimSpace(mailCookies)
 	if trimmedCookies != "" {
-		if !strings.Contains(trimmedCookies, "=") || len(strings.Split(trimmedCookies, "=")[0]) == 0 {
+		parts := strings.Split(trimmedCookies, "=")
+		if len(parts) < 2 || len(parts[0]) == 0 {
 			return fmt.Errorf("MailCookies format is invalid, please check your configuration")
 		}
 	}
