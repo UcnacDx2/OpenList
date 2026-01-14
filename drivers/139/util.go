@@ -761,17 +761,100 @@ func getMd5(dataStr string) string {
 	return fmt.Sprintf("%x", hash)
 }
 
+// sanitizeMailCookiesForLogin extracts only device fingerprint cookies for step1 login
+// Removes old a_l and a_l2 tokens to avoid "session fixation attack" detection
+func sanitizeMailCookiesForLogin(cookieStr string) string {
+	// Allowed cookie keys for device fingerprint
+	allowedKeys := map[string]bool{
+		"behaviorid":          true,
+		"Os_SSo_Sid":          true,
+		"_139_index_isLoginType": true,
+		"_139_login_version":  true,
+		"Login_UserNumber":    true,
+		"cookiepartid8011":    true,
+		"_139_login_agreement": true,
+		"UserData":            true,
+		"rmUin8011":           true,
+		"cookiepartid":        true,
+		"UUIDToken":           true,
+		"SkinPath28011":       true,
+		"cbauto":              true,
+		"areaCode8011":        true,
+		"cookieLen":           true,
+		"DEVICE_INFO_DIGEST":  true,
+		"JSESSIONID":          true,
+		"loginProcessFlag":    true,
+		"provCode8011":        true,
+		"S_DEVICE_TOKEN":      true,
+		"taskIdCloud":         true,
+		"UserNowState":        true,
+		"UserNowState8011":    true,
+		"ut8011":              true,
+	}
+
+	cookies := strings.Split(cookieStr, ";")
+	var sanitized []string
+	for _, cookie := range cookies {
+		cookie = strings.TrimSpace(cookie)
+		if cookie == "" {
+			continue
+		}
+		parts := strings.SplitN(cookie, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		key := strings.TrimSpace(parts[0])
+		// Only include allowed cookies, exclude a_l and a_l2
+		if allowedKeys[key] && key != "a_l" && key != "a_l2" {
+			sanitized = append(sanitized, cookie)
+		}
+	}
+	return strings.Join(sanitized, "; ")
+}
+
 func (d *Yun139) step1_password_login() (string, error) {
 	log.Debugf("--- 执行步骤 1: 登录 API ---")
 	loginURL := "https://mail.10086.cn/Login/Login.ashx"
+
+	// Sanitize cookies to preserve only device fingerprint
+	sanitizedCookies := sanitizeMailCookiesForLogin(d.MailCookies)
+	log.Debugf("DEBUG: Sanitized cookies (device fingerprint only): %s", sanitizedCookies)
+
+	cguid := strconv.FormatInt(time.Now().UnixMilli(), 10) // 随机生成 cguid
+
+	// Step 1.1: Perform GET request to obtain fresh JSESSIONID
+	getURL := fmt.Sprintf("https://mail.10086.cn/default.html?&s=1&v=0&u=%s&m=1&ec=S001&resource=indexLogin&clientid=1003&auto=on&cguid=%s&mtime=45", 
+		base64.StdEncoding.EncodeToString([]byte(d.Username)), cguid)
+	
+	log.Debugf("DEBUG: Performing GET request to obtain JSESSIONID: %s", getURL)
+	getRes, err := base.RestyClient.R().
+		SetHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0").
+		SetHeader("Cookie", sanitizedCookies).
+		Get(getURL)
+	
+	if err != nil {
+		log.Debugf("DEBUG: GET request for JSESSIONID failed (non-critical): %v", err)
+	} else {
+		log.Debugf("DEBUG: GET request status: %d", getRes.StatusCode())
+		// Extract and update JSESSIONID if present
+		setCookieHeaders := getRes.Header().Values("Set-Cookie")
+		for _, cookieStr := range setCookieHeaders {
+			if strings.Contains(cookieStr, "JSESSIONID=") {
+				jsessionMatch := regexp.MustCompile(`JSESSIONID=([^;]+)`).FindStringSubmatch(cookieStr)
+				if len(jsessionMatch) > 1 {
+					// Update sanitized cookies with fresh JSESSIONID
+					sanitizedCookies = regexp.MustCompile(`JSESSIONID=[^;]*`).ReplaceAllString(sanitizedCookies, "JSESSIONID="+jsessionMatch[1])
+					log.Debugf("DEBUG: Updated JSESSIONID: %s", jsessionMatch[1])
+				}
+			}
+		}
+	}
 
 	// 密码 SHA1 哈希
 	hashedPassword := sha1Hash(fmt.Sprintf("fetion.com.cn:%s", d.Password))
 	log.Debugf("DEBUG: 原始密码: %s", d.Password)
 	log.Debugf("DEBUG: SHA1 输入: fetion.com.cn:%s", d.Password)
 	log.Debugf("DEBUG: 生成的 Password 哈希: %s", hashedPassword)
-
-	cguid := strconv.FormatInt(time.Now().UnixMilli(), 10) // 随机生成 cguid
 
 	loginHeaders := map[string]string{
 		"accept":                    "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
@@ -791,7 +874,7 @@ func (d *Yun139) step1_password_login() (string, error) {
 		"sec-fetch-user":            "?1",
 		"upgrade-insecure-requests": "1",
 		"user-agent":                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36 Edg/141.0.0.0",
-		"Cookie":                    d.MailCookies,
+		"Cookie":                    sanitizedCookies,
 	}
 
 	loginData := url.Values{}
@@ -829,13 +912,17 @@ func (d *Yun139) step1_password_login() (string, error) {
 	base.RestyClient.SetRedirectPolicy(resty.FlexibleRedirectPolicy(10))
 	log.Debugf("DEBUG: 登录响应 Headers: %+v", res.Header())
 
-	var sid, extractedCguid string
+	var sid, extractedCguid, errorCode string
 
-	// 从 Location 头部提取 sid 和 cguid
+	// 从 Location 头部提取 sid、cguid 和 error code
 	locationHeader := res.Header().Get("Location")
 	if locationHeader != "" {
+		log.Debugf("DEBUG: Location header: %s", locationHeader)
+		
 		sidMatch := regexp.MustCompile(`sid=([^&]+)`).FindStringSubmatch(locationHeader)
 		cguidMatch := regexp.MustCompile(`cguid=([^&]+)`).FindStringSubmatch(locationHeader)
+		ecMatch := regexp.MustCompile(`ec=([^&]+)`).FindStringSubmatch(locationHeader)
+		
 		if len(sidMatch) > 1 {
 			sid = sidMatch[1]
 			log.Debugf("DEBUG: 从 Location 提取到 sid: %s", sid)
@@ -843,6 +930,20 @@ func (d *Yun139) step1_password_login() (string, error) {
 		if len(cguidMatch) > 1 {
 			extractedCguid = cguidMatch[1]
 			log.Debugf("DEBUG: 从 Location 提取到 cguid: %s", extractedCguid)
+		}
+		if len(ecMatch) > 1 {
+			errorCode = ecMatch[1]
+			log.Warnf("DEBUG: 从 Location 提取到错误代码 ec: %s", errorCode)
+		}
+
+		// Check for risk control error codes or missing sid
+		if errorCode != "" || (strings.Contains(locationHeader, "default.html") && sid == "") {
+			errMsg := fmt.Sprintf("login failed - risk control detected or invalid response")
+			if errorCode != "" {
+				errMsg = fmt.Sprintf("login failed - error code: ec=%s (possible rate limit or security check)", errorCode)
+			}
+			log.Errorf("139yun: %s, Location: %s", errMsg, locationHeader)
+			return "", errors.New(errMsg)
 		}
 	}
 
@@ -1228,6 +1329,56 @@ func (d *Yun139) step3_third_party_login(dycpwd string) (string, error) {
 	d.UserDomainID = userDomainId
 	newAuthorization := base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("pc:%s:%s", account, authToken)))
 	return newAuthorization, nil
+}
+
+// checkTokenValidity tests if the current a_l2 token is still valid by accessing the mail portal
+func (d *Yun139) checkTokenValidity() bool {
+	if d.Authorization == "" {
+		return false
+	}
+
+	// Extract cookies from Authorization to check if a_l2 exists
+	decode, err := base64.StdEncoding.DecodeString(d.Authorization)
+	if err != nil {
+		log.Debugf("139yun: failed to decode authorization for token check: %v", err)
+		return false
+	}
+	decodeStr := string(decode)
+	splits := strings.Split(decodeStr, ":")
+	if len(splits) < 3 {
+		log.Debugf("139yun: authorization format invalid for token check")
+		return false
+	}
+
+	// Test token validity by accessing the mail portal
+	testURL := "https://appmail.mail.10086.cn/"
+	client := base.RestyClient.SetRedirectPolicy(resty.NoRedirectPolicy())
+	res, err := client.R().
+		SetHeader("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36").
+		Get(testURL)
+
+	// Restore default redirect policy
+	base.RestyClient.SetRedirectPolicy(resty.FlexibleRedirectPolicy(10))
+
+	if err != nil && res != nil && res.StatusCode() >= 300 && res.StatusCode() < 400 {
+		// Check if redirected to login page
+		location := res.Header().Get("Location")
+		if location == "https://appmail.mail.10086.cn/" || location == "" {
+			// Not redirected, token is valid
+			log.Debugf("139yun: token validity check passed (status: %d)", res.StatusCode())
+			return true
+		}
+		// Redirected to login, token expired
+		log.Debugf("139yun: token validity check failed, redirected to: %s", location)
+		return false
+	} else if err == nil && res.StatusCode() == 200 {
+		// Success response means token is valid
+		log.Debugf("139yun: token validity check passed (status: 200)")
+		return true
+	}
+
+	log.Debugf("139yun: token validity check failed with error: %v, status: %d", err, res.StatusCode())
+	return false
 }
 
 func (d *Yun139) loginWithPassword() (string, error) {
