@@ -804,8 +804,8 @@ func sanitizeMailCookiesForLogin(cookieStr string) string {
 			continue
 		}
 		key := strings.TrimSpace(parts[0])
-		// Only include allowed cookies, exclude a_l and a_l2
-		if allowedKeys[key] && key != "a_l" && key != "a_l2" {
+		// Only include allowed cookies (a_l and a_l2 are not in the allowed list)
+		if allowedKeys[key] {
 			sanitized = append(sanitized, cookie)
 		}
 	}
@@ -933,7 +933,7 @@ func (d *Yun139) step1_password_login() (string, error) {
 		}
 		if len(ecMatch) > 1 {
 			errorCode = ecMatch[1]
-			log.Warnf("DEBUG: 从 Location 提取到错误代码 ec: %s", errorCode)
+			log.Errorf("139yun: error code detected in Location: ec=%s", errorCode)
 		}
 
 		// Check for risk control error codes or missing sid
@@ -1360,24 +1360,33 @@ func (d *Yun139) checkTokenValidity() bool {
 	// Restore default redirect policy
 	base.RestyClient.SetRedirectPolicy(resty.FlexibleRedirectPolicy(10))
 
-	if err != nil && res != nil && res.StatusCode() >= 300 && res.StatusCode() < 400 {
-		// Check if redirected to login page
-		location := res.Header().Get("Location")
-		if location == "https://appmail.mail.10086.cn/" || location == "" {
-			// Not redirected, token is valid
-			log.Debugf("139yun: token validity check passed (status: %d)", res.StatusCode())
-			return true
-		}
-		// Redirected to login, token expired
-		log.Debugf("139yun: token validity check failed, redirected to: %s", location)
+	// Check if response is valid
+	if res == nil {
+		log.Debugf("139yun: token validity check failed, no response received")
 		return false
-	} else if err == nil && res.StatusCode() == 200 {
+	}
+
+	// With NoRedirectPolicy, a 3xx response means we got redirected
+	if res.StatusCode() >= 300 && res.StatusCode() < 400 {
+		location := res.Header().Get("Location")
+		log.Debugf("139yun: got redirect response (status: %d) to: %s", res.StatusCode(), location)
+		// If redirected to login page, token is invalid
+		// If not redirected or location is empty, token may still be valid
+		if location != "" && location != testURL {
+			log.Debugf("139yun: token validity check failed, redirected to login page")
+			return false
+		}
+		// No redirect or same URL means token is valid
+		log.Debugf("139yun: token validity check passed (no redirect)")
+		return true
+	} else if res.StatusCode() == 200 {
 		// Success response means token is valid
 		log.Debugf("139yun: token validity check passed (status: 200)")
 		return true
 	}
 
-	log.Debugf("139yun: token validity check failed with error: %v, status: %d", err, res.StatusCode())
+	// Any other status code indicates invalid token
+	log.Debugf("139yun: token validity check failed with status: %d", res.StatusCode())
 	return false
 }
 
