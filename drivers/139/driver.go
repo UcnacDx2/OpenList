@@ -58,7 +58,7 @@ func (d *Yun139) Init(ctx context.Context) error {
 		if len(d.Authorization) == 0 {
 			if d.Username != "" && d.Password != "" {
 				log.Infof("139yun: authorization is empty, performing password login to validate credentials.")
-				// Always use password login for initial setup to ensure credentials are valid
+				// Always use password login when Authorization is empty to ensure credentials are valid
 				// loginWithPassword() updates d.Authorization internally
 				_, err = d.loginWithPassword()
 				if err != nil {

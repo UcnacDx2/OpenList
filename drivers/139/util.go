@@ -1322,7 +1322,8 @@ func (d *Yun139) step3_third_party_login(dycpwd string) (string, error) {
 }
 
 // preAuthLogin attempts to login using existing cookies without making a request to appmail.mail.10086.cn
-// It checks if step2 parameters (Os_SSo_Sid) exist and tries step2 first, falling back to step1 if needed
+// It checks if step2 parameters (Os_SSo_Sid) exist and tries step2 first
+// Returns true if pre-auth succeeds, false if it fails (caller should proceed with full password login)
 func (d *Yun139) preAuthLogin() (bool, error) {
 	// Extract sid from cookies directly - no need to check appmail.mail.10086.cn first
 	var sid string
@@ -1345,7 +1346,7 @@ func (d *Yun139) preAuthLogin() (bool, error) {
 	token, err := d.step2_get_single_token(sid)
 	if err != nil {
 		log.Warnf("139yun: step2_get_single_token failed with existing sid: %v. sid may be expired.", err)
-		// sid is expired or invalid, need full password login to get new sid
+		// sid is expired or invalid, return false so caller can perform full password login
 		return false, nil
 	}
 
