@@ -53,6 +53,23 @@ func (d *Yun139) Init(ctx context.Context) error {
 			} else {
 				return fmt.Errorf("authorization is empty and username/password is not provided")
 			}
+		} else {
+			// Pre-auth validation: Check if existing token is still valid
+			log.Debugf("139yun: checking existing token validity...")
+			if !d.checkTokenValidity() {
+				log.Warnf("139yun: existing token is invalid, attempting to login with password.")
+				if d.Username != "" && d.Password != "" {
+					newAuth, err := d.loginWithPassword()
+					log.Debugf("newAuth: Ok: %s", newAuth)
+					if err != nil {
+						return fmt.Errorf("login with password after token validation failed: %w", err)
+					}
+				} else {
+					return fmt.Errorf("existing token is invalid and username/password is not provided for re-login")
+				}
+			} else {
+				log.Infof("139yun: existing token is valid, skipping password login.")
+			}
 		}
 		err := d.refreshToken()
 		if err != nil {
