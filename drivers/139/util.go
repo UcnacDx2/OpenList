@@ -93,35 +93,13 @@ func (d *Yun139) refreshToken() error {
 		return fmt.Errorf("authorization is invalid")
 	}
 	expiration -= time.Now().UnixMilli()
-	if expiration > 1000*60*60*24*15 {
-		// Authorization有效期大于15天无需刷新
+	if expiration > 1000*60*60*24 {
+		// If the token is valid for more than 1 day, no refresh is needed.
 		return nil
 	}
-	if expiration < 0 {
-		return fmt.Errorf("authorization has expired")
-	}
-
-	url := "https://aas.caiyun.feixin.10086.cn:443/tellin/authTokenRefresh.do"
-	var resp RefreshTokenResp
-	reqBody := "<root><token>" + splits[2] + "</token><account>" + splits[1] + "</account><clienttype>656</clienttype></root>"
-	_, err = base.RestyClient.R().
-		ForceContentType("application/xml").
-		SetBody(reqBody).
-		SetResult(&resp).
-		Post(url)
-	if err != nil || resp.Return != "0" {
-		log.Warnf("139yun: failed to refresh token with old token: %v, desc: %s. trying to login with password.", err, resp.Desc)
-		newAuth, loginErr := d.loginWithPassword()
-		log.Debugf("newAuth: Ok: %s", newAuth)
-		if loginErr != nil {
-			return fmt.Errorf("failed to login with password after refresh failed: %w", loginErr)
-		}
-		return nil
-	}
-
-	d.Authorization = base64.StdEncoding.EncodeToString([]byte(splits[0] + ":" + splits[1] + ":" + resp.Token))
-	op.MustSaveDriverStorage(d)
-	return nil
+	// The token obtained by this login method does not have a refresh interface,
+	// so we return an error to trigger a re-login.
+	return fmt.Errorf("token is about to expire, need to re-login")
 }
 
 func (d *Yun139) request(url string, method string, callback base.ReqCallback, resp interface{}) ([]byte, error) {
@@ -1321,37 +1299,16 @@ func (d *Yun139) step3_third_party_login(dycpwd string) (string, error) {
 	return newAuthorization, nil
 }
 
-func (d *Yun139) preAuthLogin() (bool, error) {
-	if !strings.Contains(d.MailCookies, "a_l2") {
-		return false, nil // No token, so can't do pre-auth
+// login is a unified login function that handles both password and cookie-based authentication.
+// It first attempts to use the existing sid from cookies. If that fails or sid is not present,
+// it falls back to a full password-based login.
+func (d *Yun139) login() (string, error) {
+	if d.Username == "" || d.MailCookies == "" {
+		return "", errors.New("username or mail_cookies is empty")
 	}
 
-	client := resty.New().SetRedirectPolicy(resty.NoRedirectPolicy())
-
-	resp, err := client.R().
-		SetHeader("Cookie", d.MailCookies).
-		Get("https://appmail.mail.10086.cn/")
-
-	if err != nil {
-		// It's not a real error if it's just a redirect being blocked by the policy.
-		// We proceed with the response object to check the status code.
-		if !strings.HasSuffix(err.Error(), "auto redirect is disabled") {
-			return false, fmt.Errorf("pre-auth request failed: %w", err)
-		}
-	}
-
-	if resp.StatusCode() == 302 {
-		location := resp.Header().Get("Location")
-		if strings.HasPrefix(location, "https://appmail.mail.10086.cn/") {
-			log.Infof("139yun: pre-auth redirect, token is invalid.")
-			return false, nil // login is invalid
-		}
-	}
-
-	log.Infof("139yun: pre-auth check successful.")
-
-	// extract sid from cookies
 	var sid string
+	// First, try to get the sid from existing cookies.
 	cookies := strings.Split(d.MailCookies, ";")
 	for _, cookie := range cookies {
 		cookie = strings.TrimSpace(cookie)
@@ -1361,54 +1318,49 @@ func (d *Yun139) preAuthLogin() (bool, error) {
 		}
 	}
 
+	var token string
+	var err error
+
+	// If sid is found, try to use it directly in step 2.
+	if sid != "" {
+		log.Infof("139yun: Found sid in cookies, attempting to get token directly.")
+		token, err = d.step2_get_single_token(sid)
+		if err == nil {
+			log.Infof("Step 2 success with existing sid, token: %s", token)
+		} else {
+			log.Warnf("139yun: step2_get_single_token failed with existing sid: %v. Proceeding with full login.", err)
+			// Invalidate sid to force step 1
+			sid = ""
+		}
+	}
+
+	// If sid was not found or step 2 failed, perform a full login starting from step 1.
 	if sid == "" {
-		log.Warnf("139yun: Os_SSo_Sid not found in cookies, proceeding with full login.")
-		return false, nil
+		if d.Password == "" {
+			return "", errors.New("password is required for full login")
+		}
+		log.Infof("139yun: No valid sid found, performing full login with password.")
+		sid, err = d.step1_password_login()
+		if err != nil {
+			return "", fmt.Errorf("step 1 failed: %w", err)
+		}
+		log.Infof("Step 1 success, sid: %s", sid)
+
+		token, err = d.step2_get_single_token(sid)
+		if err != nil {
+			return "", fmt.Errorf("step 2 failed after login: %w", err)
+		}
+		log.Infof("Step 2 success, token: %s", token)
 	}
 
-	log.Infof("139yun: using existing sid to get token.")
-	token, err := d.step2_get_single_token(sid)
-	if err != nil {
-		log.Warnf("139yun: step2_get_single_token failed with existing sid: %v. proceeding with full login.", err)
-		return false, nil
-	}
-
+	// Proceed to step 3 with the obtained token.
 	newAuth, err := d.step3_third_party_login(token)
 	if err != nil {
-		log.Warnf("139yun: step3_third_party_login failed after pre-auth: %v. proceeding with full login.", err)
-		return false, nil
-	}
-
-	d.Authorization = newAuth
-	op.MustSaveDriverStorage(d)
-
-	return true, nil
-}
-
-func (d *Yun139) loginWithPassword() (string, error) {
-	if d.Username == "" || d.Password == "" || d.MailCookies == "" {
-		return "", errors.New("username, password or mail_cookies is empty")
-	}
-
-	passId, err := d.step1_password_login()
-	if err != nil {
-		return "", err
-	}
-	log.Infof("Step 1 success, passId: %s", passId)
-
-	token, err := d.step2_get_single_token(passId)
-	if err != nil {
-		return "", err
-	}
-	log.Infof("Step 2 success, token: %s", token)
-
-	newAuth, err := d.step3_third_party_login(token)
-	if err != nil {
-		return "", err
+		return "", fmt.Errorf("step 3 failed: %w", err)
 	}
 	log.Infof("Step 3 success, new authorization generated.")
 
-	d.Authorization = newAuth // Ensure Authorization is also updated before saving
+	d.Authorization = newAuth
 	op.MustSaveDriverStorage(d)
 	return newAuth, nil
 }
