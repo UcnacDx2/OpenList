@@ -12,6 +12,10 @@ type Addition struct {
 	Password      string `json:"password" secret:"true" help:"Use together with username when Authorization is empty. mail_cookies may be left empty on the first login."`
 	SmsCode       string `json:"sms_code" secret:"true" help:"Fill this only after OpenList reports that a 139 Mail SMS verification code was sent, then save the storage again."`
 	MailCookies   string `json:"mail_cookies" type:"text" help:"Optional cookies from mail.10086.cn. Leave empty for a first username/password login; cookies created or updated by password/SMS login are persisted and reused as device context. Existing cookies may also be used alone for fast login."`
+	// DeviceProfile stores the selected username/password login method. The name is
+	// kept internally because loginWithPassword already uses this field as its HJQ dispatch hook.
+	DeviceProfile    string `json:"login_method" type:"select" options:"mail,hjq" default:"mail" help:"Choose how username/password are exchanged for Authorization. mail = 139 Mail password/SMS login; hjq = HeJiaQin (HJQ) app login. This setting applies only when username/password login is needed; existing Authorization and reusable mail_cookies remain higher-priority credentials."`
+	HJQDeviceProfile string `json:"hjq_device_profile" type:"text" help:"Required only when login_method=hjq. Paste the HJQ Android device profile JSON. Required keys: phone_id, phone_model, phone_brand, device_uuid, mac_address, app_version, android_version, phone_type. Example: {\"phone_id\":\"...\",\"phone_model\":\"...\",\"phone_brand\":\"...\",\"device_uuid\":\"...\",\"mac_address\":\"...\",\"app_version\":\"...\",\"android_version\":\"...\",\"phone_type\":\"...\"}. This is not cloud Authorization or mail cookies."`
 	driver.RootID
 	Type                 string `json:"type" type:"select" options:"personal_new,family,group,personal,share" default:"personal_new"`
 	LinkID               string `json:"link_id" type:"text" help:"Multiple shares are separated by commas or new lines. Use link_id#password for password-protected shares."`
