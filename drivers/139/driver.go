@@ -53,7 +53,7 @@ func (d *Yun139) Init(ctx context.Context) error {
 			}
 		}
 		if d.Authorization != "" {
-			err := d.refreshToken()
+			err := d.refreshAuthorization()
 			if err != nil {
 				return err
 			}
@@ -95,7 +95,7 @@ func (d *Yun139) Init(ctx context.Context) error {
 
 			d.cron = cron.NewCron(time.Hour * 12)
 			d.cron.Do(func() {
-				err := d.refreshToken()
+				err := d.refreshAuthorization()
 				if err != nil {
 					log.Errorf("%+v", err)
 				}
@@ -261,7 +261,7 @@ func (d *Yun139) MakeDir(ctx context.Context, parentDir model.Obj, dirName strin
 				},
 			},
 		}
-		pathname := "/orchestration/personalCloud/catalog/v1.0/createCatalogExt"
+		pathname = "/orchestration/personalCloud/catalog/v1.0/createCatalogExt"
 		_, err = d.post(pathname, data, nil)
 	case MetaFamily:
 		data := base.Json{
@@ -1094,7 +1094,6 @@ func (d *Yun139) GetDetails(ctx context.Context) (*model.StorageDetails, error) 
 
 	total := detail.Data.DiskSize * utils.MB
 	used := (detail.Data.DiskSize - detail.Data.FreeDiskSize) * utils.MB
-
 	return &model.StorageDetails{
 		DiskUsage: model.DiskUsage{
 			TotalSpace: total,
