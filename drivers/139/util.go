@@ -102,47 +102,7 @@ func (d *Yun139) refreshToken() error {
 	if d.ref != nil {
 		return d.ref.refreshToken()
 	}
-	decode, err := base64.StdEncoding.DecodeString(d.Authorization)
-	if err != nil {
-		return d.loginAfterAuthorizationFailure(fmt.Errorf("authorization decode failed: %w", err))
-	}
-	decodeStr := string(decode)
-	splits := strings.Split(decodeStr, ":")
-	if len(splits) < 3 {
-		return d.loginAfterAuthorizationFailure(errors.New("authorization is invalid, splits < 3"))
-	}
-	d.Account = splits[1]
-	strs := strings.Split(splits[2], "|")
-	if len(strs) < 4 {
-		return d.loginAfterAuthorizationFailure(errors.New("authorization is invalid, strs < 4"))
-	}
-	expiration, err := strconv.ParseInt(strs[3], 10, 64)
-	if err != nil {
-		return d.loginAfterAuthorizationFailure(errors.New("authorization expiration is invalid"))
-	}
-	expiration -= time.Now().UnixMilli()
-	if expiration > 1000*60*60*24*15 {
-		return nil
-	}
-	if expiration < 0 {
-		return d.loginAfterAuthorizationFailure(errors.New("authorization has expired"))
-	}
-
-	url := "https://aas.caiyun.feixin.10086.cn:443/tellin/authTokenRefresh.do"
-	var resp RefreshTokenResp
-	reqBody := "<root><token>" + splits[2] + "</token><account>" + splits[1] + "</account><clienttype>656</clienttype></root>"
-	_, err = base.RestyClient.R().
-		ForceContentType("application/xml").
-		SetBody(reqBody).
-		SetResult(&resp).
-		Post(url)
-	if err != nil || resp.Return != "0" {
-		return d.loginAfterAuthorizationFailure(fmt.Errorf("token refresh failed: %v, desc: %s", err, resp.Desc))
-	}
-
-	d.Authorization = base64.StdEncoding.EncodeToString([]byte(splits[0] + ":" + splits[1] + ":" + resp.Token))
-	op.MustSaveDriverStorage(d)
-	return nil
+	return d.refreshAuthorization()
 }
 
 // loginAfterAuthorizationFailure deliberately skips cookie fast login. Mail
