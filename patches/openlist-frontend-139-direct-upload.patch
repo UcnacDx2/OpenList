@@ -148,29 +148,29 @@ index 0000000..479a532
 +  }
 +  setUpload("progress", 100)
 +}
-+diff --git a/src/pages/home/uploads/uploads.ts b/src/pages/home/uploads/uploads.ts
-+index 6fcacd5..74ec1ef 100644
-+--- a/src/pages/home/uploads/uploads.ts
-++++ b/src/pages/home/uploads/uploads.ts
-+@@ -3,6 +3,7 @@ import { FormUpload } from "./form"
-+ import { StreamUpload } from "./stream"
-+ import { HttpDirectUpload } from "./direct"
-+ import { MultipartUpload } from "./multipart"
-++import { MultipartDirectUpload } from "./multipart_direct"
-+ import { Upload } from "./types"
-+ 
-+ type Uploader = {
-+@@ -13,6 +14,13 @@ type Uploader = {
-+ 
-+ // All upload methods
-+ const AllUploads: Uploader[] = [
-++  {
-++    name: "Multipart Direct",
-++    upload: MultipartDirectUpload,
-++    available: () => {
-++      return objStore.direct_upload_tools?.includes("MultipartDirect") || false
-++    },
-++  },
-+   {
-+     name: "Multipart",
-+     upload: MultipartUpload,
+diff --git a/src/pages/home/uploads/uploads.ts b/src/pages/home/uploads/uploads.ts
+index 6fcacd5..74ec1ef 100644
+--- a/src/pages/home/uploads/uploads.ts
++++ b/src/pages/home/uploads/uploads.ts
+@@ -3,6 +3,7 @@ import { FormUpload } from "./form"
+ import { StreamUpload } from "./stream"
+ import { HttpDirectUpload } from "./direct"
+ import { MultipartUpload } from "./multipart"
++import { MultipartDirectUpload } from "./multipart_direct"
+ import { Upload } from "./types"
+ 
+ type Uploader = {
+@@ -13,6 +14,13 @@ type Uploader = {
+ 
+ // All upload methods
+ const AllUploads: Uploader[] = [
++  {
++    name: "Multipart Direct",
++    upload: MultipartDirectUpload,
++    available: () => {
++      return objStore.direct_upload_tools?.includes("MultipartDirect") || false
++    },
++  },
+   {
+     name: "Multipart",
+     upload: MultipartUpload,
