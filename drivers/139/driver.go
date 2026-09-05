@@ -286,7 +286,7 @@ func (d *Yun139) MakeDir(ctx context.Context, parentDir model.Obj, dirName strin
 			"parentFileId": parentDir.GetID(),
 			"path":         d.dirPath(parentDir),
 		}
-		pathname := "/orchestration/group-rebuild/catalog/v1.0/modifyGroupCatalog"
+		pathname := "/orchestration/group-rebuild/catalog/v1.0/createGroupCatalog"
 		_, err = d.post(pathname, data, nil)
 	default:
 		err = errs.NotImplement
