@@ -12,6 +12,7 @@ type Addition struct {
 	Password      string `json:"password" secret:"true" help:"Use together with username when Authorization is empty. mail_cookies may be left empty on the first login."`
 	SmsCode       string `json:"sms_code" secret:"true" help:"Fill this only after OpenList reports that a 139 Mail SMS verification code was sent, then save the storage again."`
 	MailCookies   string `json:"mail_cookies" type:"text" help:"Optional cookies from mail.10086.cn. Leave empty for a first username/password login; cookies created or updated by password/SMS login are persisted and reused as device context. Existing cookies may also be used alone for fast login."`
+	DeviceProfile string `json:"device_profile" type:"text" help:"Optional HJQ device profile JSON. When provided with username/password, HJQ login is used instead of 139 Mail login."`
 	driver.RootID
 	Type                 string `json:"type" type:"select" options:"personal_new,family,group,personal,share" default:"personal_new"`
 	LinkID               string `json:"link_id" type:"text" help:"Multiple shares are separated by commas or new lines. Use link_id#password for password-protected shares."`

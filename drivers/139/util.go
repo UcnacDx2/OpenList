@@ -1903,6 +1903,10 @@ func (d *Yun139) credentialState() (credentialState, error) {
 }
 
 func (d *Yun139) loginWithPassword() (string, error) {
+	if strings.TrimSpace(d.DeviceProfile) != "" {
+		return d.loginWithHjqPassword()
+	}
+
 	if d.Username == "" || d.Password == "" {
 		return "", errors.New("username or password is empty")
 	}
