@@ -1104,7 +1104,7 @@ func (d *Yun139) uploadPersonalParts(ctx context.Context, partInfos []PartInfo, 
 					return doErr
 				}
 				defer res.Body.Close()
-				log.Debugf("[139yun] uploaded: %+v", res)
+				log.Debugf("[139yun] uploaded part %d/%d, status: %d", index+1, len(partInfos), res.StatusCode)
 				if res.StatusCode != http.StatusOK {
 					body, _ := io.ReadAll(res.Body)
 					return fmt.Errorf("unexpected status code: %d, body: %s", res.StatusCode, string(body))
