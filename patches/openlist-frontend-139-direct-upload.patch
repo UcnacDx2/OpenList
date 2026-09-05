@@ -1,0 +1,215 @@
+diff --git a/src/pages/home/uploads/multipart_direct.ts b/src/pages/home/uploads/multipart_direct.ts
+new file mode 100644
+index 0000000..69a696e
+--- /dev/null
++++ b/src/pages/home/uploads/multipart_direct.ts
+@@ -0,0 +1,183 @@
++import { pathDir, r } from "~/utils"
++import { SetUpload, Upload } from "./types"
++import { calculateHash } from "./util"
++
++type DirectPart = {
++  part_number: number
++  offset: number
++  size: number
++  upload_url: string
++  method?: string
++  headers?: Record<string, string>
++}
++
++type DirectInfo = {
++  session_id?: string
++  completed: boolean
++  parts?: DirectPart[]
++  has_more?: boolean
++}
++
++const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
++
++function createSpeedCalculator(throttleMs = 500) {
++  let lastLoaded = 0
++  let lastTime = Date.now()
++
++  return (loaded: number, setUpload: SetUpload) => {
++    const now = Date.now()
++    const timeDiff = (now - lastTime) / 1000
++    if (timeDiff >= throttleMs / 1000) {
++      setUpload("speed", Math.max(0, (loaded - lastLoaded) / timeDiff))
++      lastLoaded = loaded
++      lastTime = now
++    }
++  }
++}
++
++const getDirectInfo = async (
++  path: string,
++  file: File,
++  tool: string,
++  overwrite: boolean,
++): Promise<DirectInfo> => {
++  const resp = await r.post(
++    "/fs/get_direct_upload_info",
++    {
++      path,
++      file_name: file.name,
++      file_size: file.size,
++      tool,
++    },
++    { headers: { Overwrite: overwrite } },
++  )
++  return resp.data as DirectInfo
++}
++
++const uploadPart = async (
++  file: File,
++  part: DirectPart,
++  uploadedBytes: number,
++  reportLoaded: (loaded: number) => void,
++) => {
++  let lastError: Error | undefined
++  for (let attempt = 0; attempt < 3; attempt++) {
++    try {
++      const chunk = file.slice(
++        part.offset,
++        part.offset + part.size,
++        "application/octet-stream",
++      )
++      await new Promise<void>((resolve, reject) => {
++        const xhr = new XMLHttpRequest()
++        xhr.upload.addEventListener("progress", (e) => {
++          if (e.lengthComputable) reportLoaded(uploadedBytes + e.loaded)
++        })
++        xhr.addEventListener("load", () => {
++          if (xhr.status >= 200 && xhr.status < 300) {
++            resolve()
++          } else {
++            reject(
++              new Error(
++                `Direct upload part ${part.part_number} failed with status ${xhr.status}`,
++              ),
++            )
++          }
++        })
++        xhr.addEventListener("error", () => {
++          reject(new Error(`Direct upload part ${part.part_number} failed`))
++        })
++        xhr.open(part.method || "PUT", part.upload_url)
++        for (const [key, value] of Object.entries(part.headers || {})) {
++          xhr.setRequestHeader(key, value)
++        }
++        xhr.send(chunk)
++      })
++      return
++    } catch (e) {
++      lastError = e instanceof Error ? e : new Error(String(e))
++      if (attempt < 2) await sleep(500 * (attempt + 1))
++    }
++  }
++  throw lastError || new Error(`Direct upload part ${part.part_number} failed`)
++}
++
++export const MultipartDirectUpload: Upload = async (
++  uploadPath: string,
++  file: File,
++  setUpload: SetUpload,
++  _asTask: boolean,
++  overwrite: boolean,
++  _rapid: boolean,
++) => {
++  const path = pathDir(uploadPath)
++
++  setUpload("status", "hashing")
++  const { sha256 } = await calculateHash(file, (progress) => {
++    setUpload("progress", progress | 0)
++  })
++
++  setUpload("status", "uploading")
++  setUpload("progress", 0)
++  let info = await getDirectInfo(
++    path,
++    file,
++    `MultipartDirect:init:${sha256}`,
++    overwrite,
++  )
++  if (info.completed) {
++    setUpload("progress", 100)
++    setUpload("speed", 0)
++    return
++  }
++  if (!info.session_id) {
++    throw new Error("Multipart Direct returned an incomplete upload session")
++  }
++
++  const sessionId = info.session_id
++  const calcSpeed = createSpeedCalculator()
++  let uploadedBytes = 0
++  let peakLoaded = 0
++  const reportLoaded = (loaded: number) => {
++    peakLoaded = Math.max(peakLoaded, loaded)
++    const progress = file.size === 0 ? 100 : (peakLoaded / file.size) * 100
++    setUpload("progress", Math.min(100, progress) | 0)
++    calcSpeed(peakLoaded, setUpload)
++  }
++
++  for (;;) {
++    const parts = [...(info.parts || [])].sort(
++      (a, b) => a.part_number - b.part_number,
++    )
++    for (const part of parts) {
++      await uploadPart(file, part, uploadedBytes, reportLoaded)
++      uploadedBytes += part.size
++      reportLoaded(uploadedBytes)
++    }
++    if (!info.has_more) break
++    // 139 issues upload URLs in batches. Fetch the next batch only after the
++    // current one is uploaded so long-running uploads do not hold stale URLs.
++    info = await getDirectInfo(
++      path,
++      file,
++      `MultipartDirect:parts:${sessionId}`,
++      true,
++    )
++  }
++
++  setUpload("status", "backending")
++  setUpload("speed", 0)
++  // Completion still goes through OpenList's normal write-permission checks.
++  // Force the conflict probe off here: the 139 create call may already expose
++  // a placeholder/auto-renamed object before /complete succeeds.
++  const completed = await getDirectInfo(
++    path,
++    file,
++    `MultipartDirect:complete:${sessionId}`,
++    true,
++  )
++  if (!completed.completed) {
++    throw new Error("Multipart Direct completion failed")
++  }
++  setUpload("progress", 100)
++}
+diff --git a/src/pages/home/uploads/uploads.ts b/src/pages/home/uploads/uploads.ts
+index 6fcacd5..74ec1ef 100644
+--- a/src/pages/home/uploads/uploads.ts
++++ b/src/pages/home/uploads/uploads.ts
+@@ -3,6 +3,7 @@ import { FormUpload } from "./form"
+ import { StreamUpload } from "./stream"
+ import { HttpDirectUpload } from "./direct"
+ import { MultipartUpload } from "./multipart"
++import { MultipartDirectUpload } from "./multipart_direct"
+ import { Upload } from "./types"
+ 
+ type Uploader = {
+@@ -13,6 +14,13 @@ type Uploader = {
+ 
+ // All upload methods
+ const AllUploads: Uploader[] = [
++  {
++    name: "Multipart Direct",
++    upload: MultipartDirectUpload,
++    available: () => {
++      return objStore.direct_upload_tools?.includes("MultipartDirect") || false
++    },
++  },
+   {
+     name: "Multipart",
+     upload: MultipartUpload,
