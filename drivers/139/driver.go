@@ -286,7 +286,7 @@ func (d *Yun139) MakeDir(ctx context.Context, parentDir model.Obj, dirName strin
 			"parentFileId": parentDir.GetID(),
 			"path":         d.dirPath(parentDir),
 		}
-		pathname := "/orchestration/group-rebuild/catalog/v1.0/createGroupCatalog"
+		pathname := "/orchestration/group-rebuild/catalog/v1.0/modifyGroupCatalog"
 		_, err = d.post(pathname, data, nil)
 	default:
 		err = errs.NotImplement
@@ -978,7 +978,11 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 		rateLimited := driver.NewLimitedUploadStream(ctx, stream)
 
 		// StreamSectionReader for per-chunk buffering and retry
-		ss, err := streamPkg.NewStreamSectionReader(ctx, stream, int(partSize), &up)
+		ss, err := streamPkg.NewStreamSectionReader(&streamPkg.FileStream{
+			Ctx:    ctx,
+			Reader: rateLimited,
+			Obj:    &model.Object{Size: size},
+		}, int(partSize), &up)
 		if err != nil {
 			return err
 		}
