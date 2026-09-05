@@ -53,7 +53,7 @@ func (d *Yun139) Init(ctx context.Context) error {
 			}
 		}
 		if d.Authorization != "" {
-			err := d.refreshToken()
+			err := d.refreshAuthorization()
 			if err != nil {
 				return err
 			}
@@ -95,7 +95,7 @@ func (d *Yun139) Init(ctx context.Context) error {
 
 			d.cron = cron.NewCron(time.Hour * 12)
 			d.cron.Do(func() {
-				err := d.refreshToken()
+				err := d.refreshAuthorization()
 				if err != nil {
 					log.Errorf("%+v", err)
 				}
