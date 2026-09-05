@@ -261,7 +261,7 @@ func (d *Yun139) MakeDir(ctx context.Context, parentDir model.Obj, dirName strin
 				},
 			},
 		}
-		pathname = "/orchestration/personalCloud/catalog/v1.0/createCatalogExt"
+		pathname := "/orchestration/personalCloud/catalog/v1.0/createCatalogExt"
 		_, err = d.post(pathname, data, nil)
 	case MetaFamily:
 		data := base.Json{
@@ -978,11 +978,7 @@ func (d *Yun139) Put(ctx context.Context, dstDir model.Obj, stream model.FileStr
 		rateLimited := driver.NewLimitedUploadStream(ctx, stream)
 
 		// StreamSectionReader for per-chunk buffering and retry
-		ss, err := streamPkg.NewStreamSectionReader(&streamPkg.FileStream{
-			Ctx:    ctx,
-			Reader: rateLimited,
-			Obj:    &model.Object{Size: size},
-		}, int(partSize), &up)
+		ss, err := streamPkg.NewStreamSectionReader(ctx, stream, int(partSize), &up)
 		if err != nil {
 			return err
 		}
@@ -1094,6 +1090,7 @@ func (d *Yun139) GetDetails(ctx context.Context) (*model.StorageDetails, error) 
 
 	total := detail.Data.DiskSize * utils.MB
 	used := (detail.Data.DiskSize - detail.Data.FreeDiskSize) * utils.MB
+
 	return &model.StorageDetails{
 		DiskUsage: model.DiskUsage{
 			TotalSpace: total,
