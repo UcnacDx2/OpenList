@@ -119,6 +119,77 @@ func getTime(t string) time.Time {
 	return stamp
 }
 
+func (d *Yun139) refreshTokenWithPCAPI(account string) (string, error) {
+	userDomainID := strings.TrimSpace(d.UserDomainID)
+	if userDomainID == "" {
+		return "", errors.New("user_domain_id is required by the 139 Yun PC refreshToken API")
+	}
+
+	// Match the currently observed PC client protocol. Update this when the
+	// official client changes its request format.
+	const pcVersion = "8.9.1.20260929"
+	deviceID := strings.ToUpper(utils.GetMD5EncodeStr(account)) + "-ENDIN"
+	deviceName := base64.StdEncoding.EncodeToString([]byte("OPENLIST-PC"))
+	language := base64.StdEncoding.EncodeToString([]byte("Chinese (Simplified)"))
+	deviceInfo := fmt.Sprintf("||11|%s|PC|%s|%s|| Windows 10|1920X1080|%s|||",
+		pcVersion, deviceName, deviceID, language)
+
+	authHeader := "Basic " + d.getAuthorization()
+	svcType := "1"
+	if d.isFamily() {
+		svcType = "2"
+	}
+
+	var resp struct {
+		Success bool   `json:"success"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Data    struct {
+			Token      string `json:"token"`
+			ExpireTime int64  `json:"expireTime"`
+		} `json:"data"`
+	}
+
+	req := base.RestyClient.R()
+	req.SetHeaders(map[string]string{
+		"Accept":                "*/*",
+		"Accept-Language":       "zh-CN",
+		"Content-Type":          "application/json;charset=UTF-8",
+		"User-Agent":            fmt.Sprintf("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) mCloud/%s Chrome/108.0.5359.215 Electron/22.3.0 Safari/537.36", pcVersion),
+		"app_auth":              authHeader,
+		"app_cp":                "pc",
+		"authorization":         authHeader,
+		"cp_version":            pcVersion,
+		"x-deviceinfo":          deviceInfo,
+		"x-exproute-code":       "routeCode=" + account + ",type=2",
+		"x-yun-api-version":     "v1",
+		"x-yun-app-channel":     "10200153",
+		"x-yun-client-info":     deviceInfo,
+		"x-yun-device-id":       deviceID,
+		"x-yun-market-source":   "000",
+		"x-yun-module-type":     "100",
+		"x-yun-op-type":         "1",
+		"x-yun-svc-type":        svcType,
+		"x-yun-uni":             userDomainID,
+	})
+	if cookies := strings.TrimSpace(d.PCCloudCookies); cookies != "" {
+		req.SetHeader("Cookie", cookies)
+	}
+
+	_, err := req.
+		SetBody(base.Json{"userDomainId": userDomainID}).
+		SetResult(&resp).
+		Post("https://user-njs.yun.139.com/user/auth/refreshToken")
+	if err != nil {
+		return "", fmt.Errorf("new 139 Yun token refresh request failed: %w", err)
+	}
+	if !resp.Success || resp.Code != "0000" || strings.TrimSpace(resp.Data.Token) == "" {
+		return "", fmt.Errorf("new 139 Yun token refresh failed: success=%t, code=%q, message=%q",
+			resp.Success, resp.Code, resp.Message)
+	}
+	return resp.Data.Token, nil
+}
+
 func (d *Yun139) refreshToken() error {
 	if d.ref != nil {
 		return d.ref.refreshToken()
@@ -149,22 +220,14 @@ func (d *Yun139) refreshToken() error {
 		return d.loginAfterAuthorizationFailure(errors.New("authorization has expired"))
 	}
 
-	url := "https://aas.caiyun.feixin.10086.cn:443/tellin/authTokenRefresh.do"
-	var resp RefreshTokenResp
-	reqBody := "<root><token>" + splits[2] + "</token><account>" + splits[1] + "</account><clienttype>656</clienttype></root>"
-	_, err = base.RestyClient.R().
-		ForceContentType("application/xml").
-		SetBody(reqBody).
-		SetResult(&resp).
-		Post(url)
-	if err != nil || resp.Return != "0" {
-		return d.loginAfterAuthorizationFailure(fmt.Errorf("token refresh failed: %v, desc: %s", err, resp.Desc))
+	newToken, err := d.refreshTokenWithPCAPI(splits[1])
+	if err != nil {
+		return d.loginAfterAuthorizationFailure(err)
 	}
 
-	d.Authorization = base64.StdEncoding.EncodeToString([]byte(splits[0] + ":" + splits[1] + ":" + resp.Token))
+	d.Authorization = base64.StdEncoding.EncodeToString([]byte(splits[0] + ":" + splits[1] + ":" + newToken))
 	op.MustSaveDriverStorage(d)
 	return nil
-}
 
 // loginAfterAuthorizationFailure deliberately skips cookie fast login. Mail
 // cookies are only reused as device context for the password login request.
