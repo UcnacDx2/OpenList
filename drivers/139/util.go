@@ -228,6 +228,7 @@ func (d *Yun139) refreshToken() error {
 	d.Authorization = base64.StdEncoding.EncodeToString([]byte(splits[0] + ":" + splits[1] + ":" + newToken))
 	op.MustSaveDriverStorage(d)
 	return nil
+}
 
 // loginAfterAuthorizationFailure deliberately skips cookie fast login. Mail
 // cookies are only reused as device context for the password login request.
